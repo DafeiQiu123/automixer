@@ -29,11 +29,22 @@ else:
 if resampler is None:
     input_audio = dataset[0]["audio"]["array"]
 else:
-  input_audio = resampler(torch.from_numpy(dataset[0]["audio"]["array"]))
+  input_audio = resampler(torch.from_numpy(dataset[0]["audio"]["array"]).float())
   
 inputs = processor(input_audio, sampling_rate=resample_rate, return_tensors="pt")
 with torch.no_grad():
     outputs = model(**inputs, output_hidden_states=True)
+
+if hasattr(outputs, "last_hidden_state"):
+    print(f"Last Hidden State Shape: {outputs.last_hidden_state.shape}")
+else:
+    # 如果没有 last_hidden_state 属性，通常 hidden_states 的最后一个就是
+    print(f"Last Hidden State Shape (from hidden_states): {outputs.hidden_states[-1].shape}")
+
+last_block_output = outputs.hidden_states[-1]
+print(f"Last Transformer Block Output Shape: {last_block_output.shape}")
+
+print("Keys in outputs:", outputs.keys())
 
 # take a look at the output shape, there are 13 layers of representation
 # each layer performs differently in different downstream tasks, you should choose empirically
