@@ -1,77 +1,108 @@
 import numpy as np
-import librosa
 import soundfile as sf
+import librosa
+import matplotlib.pyplot as plt
 
 
-###############################################################################
-# 0. 提取 beat_phase (librosa)
-###############################################################################
-def get_beat_phase(audio, sr, T=200):
-    """
-    使用 librosa 自动检测拍点并生成 beat phase 序列。
-    beat_phase(t) ∈ [0,1)
-    """
+################################################################################
+# 0. Compute beat position (absolute beats)
+################################################################################
+def estimate_bpm(audio, sr,
+                 min_bpm=70.0,
+                 max_bpm=160.0,
+                 default_bpm=120.0):
+
+    onset_env = librosa.onset.onset_strength(y=audio, sr=sr)
+
     try:
-        tempo, beat_times = librosa.beat.beat_track(y=audio, sr=sr, units="time")
+        tempo = librosa.beat.tempo(
+            onset_envelope=onset_env,
+            sr=sr,
+            aggregate=np.median,
+            max_tempo=320.0
+        )[0]
     except:
-        print("WARNING: librosa beat tracking failed → using linear phase.")
-        return np.linspace(0, 1, T)
+        return default_bpm
 
-    if len(beat_times) < 2:
-        print("WARNING: insufficient beat detections → using linear phase.")
-        return np.linspace(0, 1, T)
+    if tempo <= 0 or np.isnan(tempo):
+        return default_bpm
 
+    while tempo > max_bpm:
+        tempo /= 2.0
+    while tempo < min_bpm:
+        tempo *= 2.0
+
+    return float(np.clip(tempo, min_bpm, max_bpm))
+
+
+def compute_beat_position(audio, sr, T=200):
+
+    bpm = estimate_bpm(audio, sr)
     duration = len(audio) / sr
-    frame_times = np.linspace(0, duration, T)
+    time_axis = np.linspace(0, duration, T)
 
-    beat_phase = np.zeros(T)
-    idx = 0
-    for i, t in enumerate(frame_times):
-        while idx + 1 < len(beat_times) and beat_times[idx+1] < t:
-            idx += 1
-
-        beat_len = beat_times[idx+1] - beat_times[idx] if idx+1 < len(beat_times) else 1e-8
-        beat_phase[i] = (t - beat_times[idx]) / beat_len
-
-    return beat_phase % 1.0
+    beat_pos = (bpm / 60.0) * time_axis
+    return beat_pos, bpm, time_axis
 
 
-###############################################################################
-# 1. BPM-aware DSP template (EQ + loudness)
-###############################################################################
-def bpm_dsp_auto(T, beat_phase):
+def bpm_morph_scheduler(T, beat_pos_A, beat_pos_B):
     """
-    自动生成 EQ 与 loudness，不需要模型预测。
+    Crossfade A->B beat positions smoothly
+    """
+    t = np.linspace(0, 1, T)
+    return (1 - t) * beat_pos_A + t * beat_pos_B
+
+################################################################################
+# 1. DSP schedule — use ONLY model outputs
+################################################################################
+def model_dsp_schedule(T, beat_pos, params):
+    """
+    params:
+        hpf1, hpf2,
+        lpf1, lpf2,
+        eq_low, eq_mid, eq_high,
+        duration_ratio (not used here)
     """
 
     t = np.linspace(0, 1, T)
 
-    # --- EQ ---
-    eq_low = 1 - 0.15 * (beat_phase > 0.9)
-    eq_mid = 1 + 0.1 * np.sin(2*np.pi*beat_phase)
-    eq_high = np.ones(T)
+    # Gain — still beat-driven
+    gainA = (1 - t) + 0.05 * np.sin(2 * np.pi * beat_pos)
+    gainB = t         + 0.05 * np.sin(2 * np.pi * beat_pos)
 
-    # --- Loudness linear down-up + beat pumping ---
-    min_loud = 0.7
-    half = T // 2
-    loud_down = np.linspace(1, min_loud, half)
-    loud_up   = np.linspace(min_loud, 1, T - half)
-    loud = np.concatenate([loud_down, loud_up])
+    # 4 filter values from model
+    hpf1 = params["hpf1"]
+    hpf2 = params["hpf2"]
+    lpf1 = params["lpf1"]
+    lpf2 = params["lpf2"]
 
-    # add pumping
-    loud *= (1 - 0.25 * np.exp(-4 * beat_phase))
+    stage = (t >= 0.5).astype(float)
+    hpf = hpf1 * (1 - stage) + hpf2 * stage
+    lpf = lpf1 * (1 - stage) + lpf2 * stage
 
-    return eq_low, eq_mid, eq_high, loud
+    # EQ from model
+    eq_low  = np.ones(T) * params["eq_low"]
+    eq_mid  = np.ones(T) * params["eq_mid"]
+    eq_high = np.ones(T) * params["eq_high"]
+
+    # Loudness envelope
+    loud = np.concatenate([
+        np.linspace(1, 0.7, T//2),
+        np.linspace(0.7, 1, T - T//2)
+    ])
+
+    loud *= (1 - 0.25 * np.exp(-2 * np.mod(beat_pos, 1)))
+
+    return np.stack([gainA, gainB, hpf, lpf, eq_low, eq_mid, eq_high, loud], axis=-1)
 
 
-###############################################################################
-# 2. DSP ENGINE
-###############################################################################
+################################################################################
+# 2. DSP Engine
+################################################################################
 class DSPEngine:
     def __init__(self, sr=16000):
         self.sr = sr
 
-    # -------------------------
     def _filter_freq(self, audio, cutoff, mode="lowpass"):
         fft = np.fft.rfft(audio)
         freqs = np.fft.rfftfreq(len(audio), 1/self.sr)
@@ -83,125 +114,161 @@ class DSPEngine:
 
         return np.fft.irfft(fft, n=len(audio))
 
-    # -------------------------
     def _apply_eq(self, audio, elo, emid, ehi):
+
         fft = np.fft.rfft(audio)
         freqs = np.fft.rfftfreq(len(audio), 1/self.sr)
 
         fft[freqs < 200] *= elo
-        fft[(freqs>=200)&(freqs<2000)] *= emid
-        fft[freqs>=2000] *= ehi
+        fft[(freqs >= 200) & (freqs < 2000)] *= emid
+        fft[freqs >= 2000] *= ehi
 
         return np.fft.irfft(fft, n=len(audio))
 
-    # -------------------------
-    def render(self, A, B, gainA, gainB, hpf, lpf, eq_low, eq_mid, eq_high, loud):
+    def render_transition(self, A, B, dsp_params):
+
+        T = dsp_params.shape[0]
         L = min(len(A), len(B))
 
-        # Filter
-        A_f = self._filter_freq(A[:L], np.mean(hpf), mode="highpass")
-        B_f = self._filter_freq(B[:L], np.mean(lpf), mode="lowpass")
+        x = np.linspace(0,1,T)
+        xf = np.linspace(0,1,L)
+        interp = lambda p: np.interp(xf, x, p)
 
-        # EQ
-        A_eq = self._apply_eq(A_f, np.mean(eq_low), np.mean(eq_mid), np.mean(eq_high))
-        B_eq = self._apply_eq(B_f, np.mean(eq_low), np.mean(eq_mid), np.mean(eq_high))
+        gainA = interp(dsp_params[:,0])
+        gainB = interp(dsp_params[:,1])
 
-        # Mix
-        mix = gainA * A_eq + gainB * B_eq
+        hpf_cut = interp(dsp_params[:,2])
+        lpf_cut = interp(dsp_params[:,3])
+
+        eq_low  = interp(dsp_params[:,4])
+        eq_mid  = interp(dsp_params[:,5])
+        eq_high = interp(dsp_params[:,6])
+
+        loud = interp(dsp_params[:,7])
+
+        # Per-sample filtering
+        A_proc = np.zeros(L)
+        B_proc = np.zeros(L)
+
+        for i in range(L):
+            A_proc[i] = self._apply_eq(
+                self._filter_freq(np.array([A[i]]), hpf_cut[i], "highpass"),
+                eq_low[i], eq_mid[i], eq_high[i]
+            )[0]
+
+            B_proc[i] = self._apply_eq(
+                self._filter_freq(np.array([B[i]]), lpf_cut[i], "lowpass"),
+                eq_low[i], eq_mid[i], eq_high[i]
+            )[0]
+
+        mix = gainA * A_proc + gainB * B_proc
         mix *= loud
-        return mix
+
+        return mix / (np.max(np.abs(mix)) + 1e-9) * 0.95
 
 
-###############################################################################
-# 3. 主函数：模型参数 + librosa beat → 最终音频
-###############################################################################
-def render_transition(
+################################################################################
+# 3. Create transition using MODEL OUTPUTS
+################################################################################
+def make_transition(
     audioA_path,
     audioB_path,
-    dsp_seq,         # (T, 4): gainA, gainB, hpf, lpf
-    duration_ratio,  # scalar
+    params,                 # <---- the model output dictionary
     out_path="transition.wav",
+    plot_path="dsp_plot.png",
     sr=16000,
     max_transition_seconds=20
 ):
-    T = dsp_seq.shape[0]
 
-    # -----------------------------
     # Load audio
-    # -----------------------------
-    A_raw, sra = sf.read(audioA_path)
-    B_raw, srb = sf.read(audioB_path)
+    A, sra = sf.read(audioA_path)
+    B, srb = sf.read(audioB_path)
 
-    if A_raw.ndim > 1: A_raw = A_raw.mean(axis=1)
-    if B_raw.ndim > 1: B_raw = B_raw.mean(axis=1)
+    if A.ndim > 1: A = A.mean(axis=1)
+    if B.ndim > 1: B = B.mean(axis=1)
 
-    A = librosa.resample(A_raw, orig_sr=sra, target_sr=sr)
-    B = librosa.resample(B_raw, orig_sr=srb, target_sr=sr)
+    A = librosa.resample(A, orig_sr=sra, target_sr=sr)
+    B = librosa.resample(B, orig_sr=srb, target_sr=sr)
 
-    # -----------------------------
-    # Duration
-    # -----------------------------
-    duration_sec = duration_ratio * max_transition_seconds
-    N = int(duration_sec * sr)
+    duration_ratio = params["duration_ratio"]
+    print(f"[Transition] duration_ratio = {duration_ratio:.3f}")
+
+    N = int(duration_ratio * max_transition_seconds * sr)
 
     A_cut = A[-N:]
     B_cut = B[:N]
 
-    # -----------------------------
-    # Get beat-phase
-    # -----------------------------
-    beat_phase = get_beat_phase(A_cut, sr, T)
+    beat_A, bpmA, _ = compute_beat_position(A_cut, sr, 200)
+    beat_B, bpmB, _ = compute_beat_position(B_cut, sr, 200)
+    beat_mix = bpm_morph_scheduler(200, beat_A, beat_B)
 
-    # -----------------------------
-    # Auto DSP from BPM (EQ, loud)
-    # -----------------------------
-    eq_low, eq_mid, eq_high, loud = bpm_dsp_auto(T, beat_phase)
+    dsp_params = model_dsp_schedule(200, beat_mix, params)
 
-    # -----------------------------
-    # Extract model params
-    # -----------------------------
-    gainA = dsp_seq[:,0]
-    gainB = dsp_seq[:,1]
-    hpf   = dsp_seq[:,2]
-    lpf   = dsp_seq[:,3]
-
-    # Upsampling
-    L = len(A_cut)
-    x = np.linspace(0,1,T)
-    x_full = np.linspace(0,1,L)
-
-    gainA = np.interp(x_full, x, gainA)
-    gainB = np.interp(x_full, x, gainB)
-    loud  = np.interp(x_full, x, loud)
-
-    # -----------------------------
-    # Render DSP
-    # -----------------------------
     engine = DSPEngine(sr)
-    audio_out = engine.render(A_cut, B_cut, gainA, gainB,
-                              hpf, lpf,
-                              eq_low, eq_mid, eq_high,
-                              loud)
+    transition = engine.render_transition(A_cut, B_cut, dsp_params)
 
-    sf.write(out_path, audio_out, sr)
-    print(f"[saved] {out_path}")
-    return audio_out
+    sf.write(out_path, transition, sr)
+    print(f"[DONE] Transition saved → {out_path}")
+
+    return transition
 
 
-###############################################################################
-# Example
-###############################################################################
+
+################################################################################
+# 4. Full Song (A + transition + rest of B) — using model outputs
+################################################################################
+def make_full_song(
+    audioA_path,
+    audioB_path,
+    params,
+    out_path="full_mix.wav",
+    sr=16000,
+    max_transition_seconds=20
+):
+
+    A, sra = sf.read(audioA_path)
+    B, srb = sf.read(audioB_path)
+
+    if A.ndim > 1: A = A.mean(axis=1)
+    if B.ndim > 1: B = B.mean(axis=1)
+
+    A = librosa.resample(A, orig_sr=sra, target_sr=sr)
+    B = librosa.resample(B, orig_sr=srb, target_sr=sr)
+
+    N = int(params["duration_ratio"] * max_transition_seconds * sr)
+
+    A_cut = A[-N:]
+    B_cut = B[:N]
+    B_rest = B[N:]
+
+    beat_A, _, _ = compute_beat_position(A_cut, sr, 200)
+    beat_B, _, _ = compute_beat_position(B_cut, sr, 200)
+    beat_mix = bpm_morph_scheduler(200, beat_A, beat_B)
+
+    dsp_params = model_dsp_schedule(200, beat_mix, params)
+
+    engine = DSPEngine(sr)
+    transition = engine.render_transition(A_cut, B_cut, dsp_params)
+
+    full_mix = np.concatenate([A[:-N], transition, B_rest])
+    full_mix = full_mix / (np.max(np.abs(full_mix)) + 1e-9) * 0.98
+
+    sf.write(out_path, full_mix, sr)
+    print(f"[DONE] Full song saved → {out_path}")
+
+    return full_mix
+
 if __name__ == "__main__":
+    model_params = {
+    "hpf1": 80,
+    "hpf2": 350,
+    "lpf1": 14000,
+    "lpf2": 4500,
+    "eq_low": 1.1,
+    "eq_mid": 1.25,
+    "eq_high": 0.85,
+    "duration_ratio": 0.75
+    }
 
-    # Fake model output example
-    T = 200
-    dsp_seq = np.random.rand(T, 4)       # 模型输出
-    duration_ratio = 0.6                 # 模型输出
-
-    render_transition(
-        "songA.mp3",
-        "songB.mp3",
-        dsp_seq,
-        duration_ratio,
-        out_path="transition.wav"
-    )
+    make_transition("songA.mp3", "songB.mp3", model_params)
+    make_full_song("songA.mp3", "songB.mp3", model_params)
