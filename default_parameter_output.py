@@ -20,12 +20,23 @@ def estimate_bpm(audio, sr,
     onset_env = librosa.onset.onset_strength(y=audio, sr=sr)
 
     try:
-        tempo = librosa.beat.tempo(
-            onset_envelope=onset_env,
-            sr=sr,
-            aggregate=np.median,
-            max_tempo=320.0,
-        )[0]
+        # Prefer librosa 0.10+ API to avoid FutureWarning
+        try:
+            tempo_arr = librosa.feature.rhythm.tempo(
+                onset_envelope=onset_env,
+                sr=sr,
+                aggregate=np.median,
+                max_tempo=320.0,
+            )
+        except Exception:
+            # Fallback to old alias for older librosa
+            tempo_arr = librosa.beat.tempo(
+                onset_envelope=onset_env,
+                sr=sr,
+                aggregate=np.median,
+                max_tempo=320.0,
+            )
+        tempo = float(tempo_arr[0])
     except Exception as e:
         print(f"[WARN] tempo() failed: {e}")
         return default_bpm
