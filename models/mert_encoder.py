@@ -25,8 +25,8 @@ class MERTEncoder:
         self.target_sr = 16000
         self.embedding_dim = self.model.config.hidden_size  # e.g., 768
 
-    def load_audio(self, path: str, start_sec: float | None = None,
-                   end_sec: float | None = None) -> torch.Tensor:
+    def load_audio(self, path: str, start_sec: Optional[float] = None,
+                   end_sec: Optional[float] = None) -> torch.Tensor:
         """
         Load audio, convert to mono, resample to target_sr, and optional trim.
         加载音频，转 mono，重采样，截取片段。
@@ -82,8 +82,8 @@ class MERTEncoder:
         f = interp1d(x_old, frames, axis=0, kind="linear")
         return f(x_new)
 
-    def encode_segment(self, path: str, start_sec: float | None,
-                       end_sec: float | None, target_frames: int) -> np.ndarray:
+    def encode_segment(self, path: str, start_sec: Optional[float],
+                       end_sec: Optional[float], target_frames: int) -> np.ndarray:
         """
         High-level API: audio file -> segment -> MERT -> fixed-length frames.
         """

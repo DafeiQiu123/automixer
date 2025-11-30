@@ -3,6 +3,7 @@ import sys
 import math
 import time
 import json
+import argparse
 from typing import List, Tuple, Optional
 
 import numpy as np
@@ -23,64 +24,21 @@ from models.transformer_mixer import MixerTransformer
 from default_parameter_output import extract_all_parameters
 
 
-def _is_probably_root_line(line: str) -> bool:
-    line = line.strip()
-    if not line:
-        return False
-    # 认为不含制表符并且看起来像路径的第一行是根目录
-    return ("\t" not in line) and ("/" in line or "\\" in line)
+def _list_audio_files(input_dir: str,
+                      exts: Tuple[str, ...] = (".wav",)) -> List[str]:
+    files = []
+    for name in sorted(os.listdir(input_dir)):
+        if name.lower().endswith(exts):
+            files.append(os.path.abspath(os.path.join(input_dir, name)))
+    return files
 
 
-def _parse_manifest(tsv_path: str,
-                    override_root: Optional[str] = None) -> List[str]:
+def build_pairs_from_dir(input_dir: str) -> List[Tuple[str, str]]:
     """
-    支持两种 manifest 结构：
-    1) 第一行是根目录，后续行: "filename<TAB>length"
-    2) 每一行是完整路径或 "filename<TAB>length"
-    返回：音频文件的绝对路径列表（按顺序）
+    从目录生成顺序相邻的 (A, B) 对。
+    仅基于文件名排序。
     """
-    with open(tsv_path, "r", encoding="utf-8") as f:
-        lines = [ln.strip() for ln in f.readlines() if ln.strip()]
-
-    if not lines:
-        return []
-
-    root_from_file = None
-    start_idx = 0
-    if _is_probably_root_line(lines[0]):
-        root_from_file = lines[0]
-        start_idx = 1
-
-    audio_paths: List[str] = []
-    for ln in lines[start_idx:]:
-        parts = ln.split("\t")
-        # 处理 "path\tlength" 或 "filename\tlength" 或 单列完整路径
-        if len(parts) == 1:
-            item = parts[0]
-            if os.path.isabs(item):
-                path = item
-            else:
-                base_root = override_root or root_from_file or os.path.dirname(tsv_path)
-                path = os.path.join(base_root, item)
-        else:
-            item = parts[0]
-            # 如果 item 看起来是绝对路径，直接用；否则拼接根目录
-            if os.path.isabs(item):
-                path = item
-            else:
-                base_root = override_root or root_from_file or os.path.dirname(tsv_path)
-                path = os.path.join(base_root, item)
-        audio_paths.append(os.path.abspath(path))
-
-    return audio_paths
-
-
-def build_pairs_from_manifest(tsv_path: str,
-                              override_root: Optional[str] = None) -> List[Tuple[str, str]]:
-    """
-    从 manifest 生成顺序相邻的 (A, B) 对。
-    """
-    files = _parse_manifest(tsv_path, override_root)
+    files = _list_audio_files(input_dir)
     pairs: List[Tuple[str, str]] = []
     for i in range(len(files) - 1):
         pairs.append((files[i], files[i + 1]))
@@ -238,25 +196,68 @@ def evaluate(model: nn.Module,
 
 
 def main():
-    # 配置
-    train_tsv = os.path.join(_ROOT_DIR, "data", "train.tsv")
-    valid_tsv = os.path.join(_ROOT_DIR, "data", "valid.tsv")
-    # 可选：如果 manifest 的根目录不是你本地的真实路径，使用 override_root
-    override_root = os.path.join(_ROOT_DIR, "data", "wav_dir")
+    # 命令行参数
+    parser = argparse.ArgumentParser(description="Train MixerTransformer from a directory of audio files.")
+    parser.add_argument("--input_dir", type=str,
+                        default=os.path.join(_ROOT_DIR, "data", "wav_dir"),
+                        help="输入音频目录（包含 .wav）")
+    parser.add_argument("--valid_ratio", type=float, default=0.1,
+                        help="验证集占比 (0,1)")
+    parser.add_argument("--epochs", type=int, default=3, help="训练轮数")
+    parser.add_argument("--batch_size", type=int, default=1, help="批大小")
+    parser.add_argument("--num_workers", type=int, default=0, help="DataLoader workers")
+    parser.add_argument("--lr", type=float, default=2e-4, help="学习率")
+    parser.add_argument("--target_frames", type=int, default=200, help="每段帧数")
+    parser.add_argument("--max_transition_seconds", type=int, default=20, help="用于参数分析的过渡最长秒数")
+    parser.add_argument("--model_d_model", type=int, default=512, help="Transformer d_model")
+    parser.add_argument("--model_nhead", type=int, default=8, help="多头注意力头数")
+    parser.add_argument("--model_layers", type=int, default=4, help="Transformer 层数")
+    parser.add_argument("--dsp_dim", type=int, default=8, help="输出 DSP 维度")
+    parser.add_argument("--save_path", type=str,
+                        default=os.path.join(_ROOT_DIR, "models", "mixer_checkpoint.pt"),
+                        help="checkpoint 保存路径")
+    args = parser.parse_args()
 
-    target_frames = 200
-    max_transition_seconds = 20
-    batch_size = 1            # MERT + 推理较重，建议从 1 开始
-    num_workers = 0
-    epochs = 3
-    lr = 2e-4
+    # 配置检查
+    input_dir = args.input_dir
+    if not os.path.isdir(input_dir):
+        raise FileNotFoundError(f"Input directory not found: {input_dir}")
+    valid_ratio = float(args.valid_ratio)
+    if not (0.0 < valid_ratio < 1.0):
+        print(f"[WARN] invalid valid_ratio={valid_ratio}, fallback to 0.1")
+        valid_ratio = 0.1
+
+    target_frames = int(args.target_frames)
+    max_transition_seconds = int(args.max_transition_seconds)
+    batch_size = int(args.batch_size)
+    num_workers = int(args.num_workers)
+    epochs = int(args.epochs)
+    lr = float(args.lr)
+    d_model = int(args.model_d_model)
+    nhead = int(args.model_nhead)
+    num_layers = int(args.model_layers)
+    dsp_dim = int(args.dsp_dim)
+    ckpt_path = args.save_path
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    # 数据对
-    train_pairs = build_pairs_from_manifest(train_tsv, override_root=override_root)
-    valid_pairs = build_pairs_from_manifest(valid_tsv, override_root=override_root)
+    # 数据对（目录内相邻两首歌成对），并做简单切分
+    all_pairs = build_pairs_from_dir(input_dir)
+    if len(all_pairs) < 2:
+        raise RuntimeError(f"Not enough pairs found in {input_dir}. Need at least 2 files.")
+    split = int(round((1.0 - valid_ratio) * len(all_pairs)))
+    if split <= 0:
+        split = 1
+    if split >= len(all_pairs):
+        split = len(all_pairs) - 1
+    train_pairs = all_pairs[:split]
+    valid_pairs = all_pairs[split:]
 
-    print(f"[Data] #train pairs={len(train_pairs)}, #valid pairs={len(valid_pairs)}")
+    print(f"[Data] input_dir={input_dir}")
+    print(f"[Data] #train pairs={len(train_pairs)}, #valid pairs={len(valid_pairs)} (valid_ratio={valid_ratio:.3f})")
+    print(f"[Config] target_frames={target_frames}, max_transition_seconds={max_transition_seconds}")
+    print(f"[Config] epochs={epochs}, batch_size={batch_size}, num_workers={num_workers}, lr={lr}")
+    print(f"[Model] d_model={d_model}, nhead={nhead}, layers={num_layers}, dsp_dim={dsp_dim}")
+    print(f"[Save] ckpt_path={ckpt_path}")
 
     # 编码器与模型
     mert = MERTEncoder(model_name="m-a-p/MERT-v1-95M")
@@ -265,17 +266,17 @@ def main():
 
     model = MixerTransformer(
         in_dim=in_dim_total,
-        d_model=512,
-        nhead=8,
-        num_layers=4,
-        dsp_dim=8
+        d_model=d_model,
+        nhead=nhead,
+        num_layers=num_layers,
+        dsp_dim=dsp_dim
     ).to(device)
 
     # 数据集
     train_ds = ABMixerDataset(
         pairs=train_pairs,
         mert_encoder=mert,
-        target_frames=target_frames
+        target_frames=target_frames,
         max_transition_seconds=max_transition_seconds
     )
     valid_ds = ABMixerDataset(
@@ -319,7 +320,6 @@ def main():
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
 
     best_valid = float("inf")
-    ckpt_path = os.path.join(_ROOT_DIR, "models", "mixer_checkpoint.pt")
 
     for epoch in range(1, epochs + 1):
         t0 = time.time()
@@ -335,10 +335,10 @@ def main():
                 "model_state": model.state_dict(),
                 "config": {
                     "in_dim": in_dim_total,
-                    "d_model": 512,
-                    "nhead": 8,
-                    "num_layers": 4,
-                    "dsp_dim": 8,
+                    "d_model": d_model,
+                    "nhead": nhead,
+                    "num_layers": num_layers,
+                    "dsp_dim": dsp_dim,
                     "target_frames": target_frames,
                 }
             }, ckpt_path)
