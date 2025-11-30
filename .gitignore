@@ -1,3 +1,73 @@
+# =========================
+# OS / IDE / Python 缓存
+# =========================
+.DS_Store
+.idea/
+.vscode/
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+.ipynb_checkpoints/
+
+# =========================
+# 虚拟环境 / 本地配置
+# =========================
+.env
+.env.*
+.venv/
+venv/
+env/
+
+# =========================
+# 训练日志与缓存
+# =========================
+logs/
+*.log
+runs/
+wandb/
+lightning_logs/
+.cache/
+hf_cache/
+
+# =========================
+# 大型数据（保留小型清单与脚本）
+# =========================
+# 原始/预处理音频数据
+data/wav_dir/**
+data/encodec_labels_train/**
+data/fma_small_demo/**
+# 允许提交的数据清单与脚本
+!data/train.tsv
+!data/valid.tsv
+!data/build_pairs.py
+!data/dataset.py
+!data/trim_to_min_length.py
+
+# 若根目录存在示例歌曲，避免误提交大文件
+songA.mp3
+songB.mp3
+
+# =========================
+# 生成音频与可视化
+# =========================
+outputs/
+outputs/**
+full_mix.wav
+transition.wav
+dsp_plot.png
+
+# =========================
+# 模型权重 / 中间产物
+# =========================
+checkpoints/
+artifacts/
+*.pt
+*.pth
+*.ckpt
+models/mixer_checkpoint.pt
+
 .venv
 cuda-11.3
 MERT/cuda_11.3.1_465.19.01_linux.run

@@ -22,7 +22,8 @@ class MERTEncoder:
             trust_remote_code=True
         ).to(self.device)
 
-        self.target_sr = 16000
+        # MERT 的特征提取器期望 24000Hz（参见报错信息），与之保持一致
+        self.target_sr = 24000
         self.embedding_dim = self.model.config.hidden_size  # e.g., 768
 
     def load_audio(self, path: str, start_sec: Optional[float] = None,

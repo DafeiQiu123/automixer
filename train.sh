@@ -1,0 +1,1 @@
+python models/data_pipeline.py --input_dir data/wav_dir_trimmed  --valid_ratio 0.1 --epochs 1 --batch_size 8
