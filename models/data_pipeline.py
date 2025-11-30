@@ -11,6 +11,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
+from tqdm import tqdm
 
 # 保证可以从项目根目录导入模块（例如 default_parameter_output.py）
 _CUR_DIR = os.path.dirname(__file__)
@@ -200,12 +201,18 @@ class ABMixerDataset(Dataset):
 def train_one_epoch(model: nn.Module,
                     loader: DataLoader,
                     optimizer: torch.optim.Optimizer,
-                    device: str) -> float:
+                    device: str,
+                    epoch_idx: Optional[int] = None,
+                    total_epochs: Optional[int] = None) -> float:
     model.train()
     total_loss = 0.0
     total_count = 0
 
-    for X1, X2, Y, _meta in loader:
+    desc = "Train"
+    if epoch_idx is not None and total_epochs is not None:
+        desc = f"Train [{epoch_idx}/{total_epochs}]"
+
+    for X1, X2, Y, _meta in tqdm(loader, desc=desc, dynamic_ncols=True, leave=False):
         X1 = X1.to(device)      # (B, T, d+2)
         X2 = X2.to(device)      # (B, T, d+2)
         Y = Y.to(device)        # (B, T, 8)
@@ -227,12 +234,18 @@ def train_one_epoch(model: nn.Module,
 @torch.no_grad()
 def evaluate(model: nn.Module,
              loader: DataLoader,
-             device: str) -> float:
+             device: str,
+             epoch_idx: Optional[int] = None,
+             total_epochs: Optional[int] = None) -> float:
     model.eval()
     total_loss = 0.0
     total_count = 0
 
-    for X1, X2, Y, _meta in loader:
+    desc = "Valid"
+    if epoch_idx is not None and total_epochs is not None:
+        desc = f"Valid [{epoch_idx}/{total_epochs}]"
+
+    for X1, X2, Y, _meta in tqdm(loader, desc=desc, dynamic_ncols=True, leave=False):
         X1 = X1.to(device)
         X2 = X2.to(device)
         Y = Y.to(device)
@@ -372,13 +385,15 @@ def main():
 
     best_valid = float("inf")
 
-    for epoch in range(1, epochs + 1):
+    for epoch in tqdm(range(1, epochs + 1), total=epochs, desc="Epochs", dynamic_ncols=True):
         t0 = time.time()
-        train_loss = train_one_epoch(model, train_loader, optimizer, device)
-        valid_loss = evaluate(model, valid_loader, device)
+        train_loss = train_one_epoch(model, train_loader, optimizer, device,
+                                     epoch_idx=epoch, total_epochs=epochs)
+        valid_loss = evaluate(model, valid_loader, device,
+                              epoch_idx=epoch, total_epochs=epochs)
         t1 = time.time()
-        print(f"[Epoch {epoch:02d}] train_loss={train_loss:.6f} "
-              f"valid_loss={valid_loss:.6f} time={t1 - t0:.1f}s")
+        tqdm.write(f"[Epoch {epoch:02d}] train_loss={train_loss:.6f} "
+                   f"valid_loss={valid_loss:.6f} time={t1 - t0:.1f}s")
 
         if valid_loss < best_valid:
             best_valid = valid_loss
@@ -397,7 +412,7 @@ def main():
                     },
                 }
             }, ckpt_path)
-            print(f"[Checkpoint] Saved to: {ckpt_path}")
+            tqdm.write(f"[Checkpoint] Saved to: {ckpt_path}")
 
 
 if __name__ == "__main__":
