@@ -12,6 +12,7 @@ dependencies = [
     "fairseq==0.12.2",
     "ffmpeg>=1.4",
     "librosa>=0.11.0",
+    "matplotlib>=3.7.5",
     "nnaudio>=0.3.3",
     "npy-append-array>=0.9.19",
     "numpy<1.24",

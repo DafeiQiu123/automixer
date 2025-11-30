@@ -36,6 +36,7 @@ hf_cache/
 # =========================
 # 原始/预处理音频数据
 data/wav_dir/**
+data/wav_dir_trimmed/**
 data/encodec_labels_train/**
 data/fma_small_demo/**
 # 允许提交的数据清单与脚本
