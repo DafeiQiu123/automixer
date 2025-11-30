@@ -7,6 +7,7 @@ import argparse
 from typing import List, Tuple, Optional
 
 import numpy as np
+import matplotlib.pyplot as plt
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -280,6 +281,12 @@ def main():
     parser.add_argument("--save_path", type=str,
                         default=os.path.join(_ROOT_DIR, "models", "mixer_checkpoint.pt"),
                         help="checkpoint 保存路径")
+    parser.add_argument("--ckpt_dir", type=str,
+                        default=os.path.join(_ROOT_DIR, "models", "checkpoints"),
+                        help="保存所有 epoch 的 checkpoint 的目录")
+    parser.add_argument("--plot_path", type=str,
+                        default=os.path.join(_ROOT_DIR, "training_curve.png"),
+                        help="训练曲线保存路径 (png)")
     args = parser.parse_args()
 
     # 配置检查
@@ -302,6 +309,8 @@ def main():
     num_layers = int(args.model_layers)
     dsp_dim = int(args.dsp_dim)
     ckpt_path = args.save_path
+    ckpt_dir = args.ckpt_dir
+    plot_path = args.plot_path
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
     # 数据对（目录内相邻两首歌成对），并做简单切分
@@ -321,7 +330,8 @@ def main():
     print(f"[Config] target_frames={target_frames}, max_transition_seconds={max_transition_seconds}")
     print(f"[Config] epochs={epochs}, batch_size={batch_size}, num_workers={num_workers}, lr={lr}")
     print(f"[Model] d_model={d_model}, nhead={nhead}, layers={num_layers}, dsp_dim={dsp_dim}")
-    print(f"[Save] ckpt_path={ckpt_path}")
+    print(f"[Save] ckpt_path(best)={ckpt_path}")
+    print(f"[Save] ckpt_dir(all epochs)={ckpt_dir}")
 
     # 编码器与模型
     mert = MERTEncoder(model_name="m-a-p/MERT-v1-95M")
@@ -384,6 +394,10 @@ def main():
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
 
     best_valid = float("inf")
+    train_losses: List[float] = []
+    valid_losses: List[float] = []
+    # 确保 checkpoint 目录存在
+    os.makedirs(ckpt_dir, exist_ok=True)
 
     for epoch in tqdm(range(1, epochs + 1), total=epochs, desc="Epochs", dynamic_ncols=True):
         t0 = time.time()
@@ -395,25 +409,56 @@ def main():
         tqdm.write(f"[Epoch {epoch:02d}] train_loss={train_loss:.6f} "
                    f"valid_loss={valid_loss:.6f} time={t1 - t0:.1f}s")
 
+        train_losses.append(float(train_loss))
+        valid_losses.append(float(valid_loss))
+
+        # 准备 checkpoint payload
+        payload = {
+            "model_state": model.state_dict(),
+            "config": {
+                "in_dim": in_dim_total,
+                "d_model": d_model,
+                "nhead": nhead,
+                "num_layers": num_layers,
+                "dsp_dim": dsp_dim,
+                "target_frames": target_frames,
+                "target_norm": {
+                    "type": "minmax",
+                    "ranges": TARGET_RANGES,
+                },
+            }
+        }
+        # 保存本 epoch 的 checkpoint（全部保留）
+        epoch_ckpt_path = os.path.join(ckpt_dir, f"checkpoint_epoch_{epoch:03d}.pt")
+        torch.save(payload, epoch_ckpt_path)
+        tqdm.write(f"[Checkpoint] Saved epoch {epoch:03d} to: {epoch_ckpt_path}")
+
         if valid_loss < best_valid:
             best_valid = valid_loss
-            torch.save({
-                "model_state": model.state_dict(),
-                "config": {
-                    "in_dim": in_dim_total,
-                    "d_model": d_model,
-                    "nhead": nhead,
-                    "num_layers": num_layers,
-                    "dsp_dim": dsp_dim,
-                    "target_frames": target_frames,
-                    "target_norm": {
-                        "type": "minmax",
-                        "ranges": TARGET_RANGES,
-                    },
-                }
-            }, ckpt_path)
-            tqdm.write(f"[Checkpoint] Saved to: {ckpt_path}")
+            # 另存一份 best 到指定路径和 ckpt_dir/best.pt
+            best_path = os.path.join(ckpt_dir, "best.pt")
+            torch.save(payload, ckpt_path)
+            torch.save(payload, best_path)
+            tqdm.write(f"[Checkpoint] Saved BEST to: {ckpt_path} and {best_path}")
 
+    # 绘制训练曲线
+    try:
+        os.makedirs(os.path.dirname(plot_path), exist_ok=True)
+        epochs_axis = list(range(1, len(train_losses) + 1))
+        plt.figure(figsize=(8, 5))
+        plt.plot(epochs_axis, train_losses, label="train_loss")
+        plt.plot(epochs_axis, valid_losses, label="valid_loss")
+        plt.xlabel("Epoch")
+        plt.ylabel("MSE Loss")
+        plt.title("Training Curve")
+        plt.grid(True, alpha=0.3)
+        plt.legend()
+        plt.tight_layout()
+        plt.savefig(plot_path)
+        plt.close()
+        tqdm.write(f"[Plot] Training curve saved to: {plot_path}")
+    except Exception as e:
+        tqdm.write(f"[Plot][WARN] Failed to save training curve: {e}")
 
 if __name__ == "__main__":
     main()

@@ -1,1 +1,1 @@
-python models/data_pipeline.py --input_dir data/wav_dir_trimmed  --valid_ratio 0.1 --epochs 5 --batch_size 8
+python models/data_pipeline.py --input_dir data/wav_dir_trimmed --epochs 5 --plot_path models/training_curve.png --batch_size 8 --valid_ratio 0.1 --ckpt_dir models/checkpoints
