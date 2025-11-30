@@ -590,10 +590,10 @@ def extract_all_parameters(
         "eq_high": float(eq_high),
     }
 
-    print("\n=================== Extracted Parameters ===================")
-    for k, v in params.items():
-        print(f"{k}: {v}")
-    print("============================================================\n")
+    # print("\n=================== Extracted Parameters ===================")
+    # for k, v in params.items():
+    #     print(f"{k}: {v}")
+    # print("============================================================\n")
 
     return params
 

@@ -45,6 +45,56 @@ def build_pairs_from_dir(input_dir: str) -> List[Tuple[str, str]]:
     return pairs
 
 
+# -----------------------------
+# 目标参数归一化（Min-Max 到 [0,1]）
+# 依据用户提供的典型范围
+# 顺序: [hpf1, hpf2, lpf1, lpf2, eq_low, eq_mid, eq_high, duration_ratio]
+# -----------------------------
+TARGET_RANGES: List[Tuple[float, float]] = [
+    (60.0, 200.0),     # hpf1
+    (200.0, 600.0),    # hpf2
+    (12000.0, 16000.0),# lpf1
+    (3000.0, 8000.0),  # lpf2
+    (0.8, 1.3),        # eq_low
+    (1.0, 1.4),        # eq_mid
+    (0.5, 1.2),        # eq_high
+    (0.0, 1.0),        # duration_ratio
+]
+
+
+def _minmax_norm_vec(y_vec: np.ndarray) -> np.ndarray:
+    y_norm = []
+    for v, (mn, mx) in zip(y_vec.tolist(), TARGET_RANGES):
+        if mx <= mn:
+            y_norm.append(0.0)
+        else:
+            val = (float(v) - mn) / (mx - mn)
+            y_norm.append(float(np.clip(val, 0.0, 1.0)))
+    return np.asarray(y_norm, dtype=np.float32)
+
+
+def denormalize_params(y_norm: np.ndarray,
+                       ranges: Optional[List[Tuple[float, float]]] = None) -> np.ndarray:
+    """
+    将归一化到 [0,1] 的参数反归一化回真实数值。
+    支持形状 (8,), (T, 8), (B, T, 8)。
+    """
+    if ranges is None:
+        ranges = TARGET_RANGES
+    y_norm = np.asarray(y_norm, dtype=np.float32)
+    if y_norm.shape[-1] != len(ranges):
+        raise ValueError(f"Last dim must be {len(ranges)}, got {y_norm.shape}")
+    r = np.asarray(ranges, dtype=np.float32)  # (8, 2)
+    mins = r[:, 0]
+    spans = r[:, 1] - r[:, 0]
+    # 广播到 y_norm 的形状
+    reshape_shape = (1,) * (y_norm.ndim - 1) + (len(ranges),)
+    mins_b = mins.reshape(reshape_shape)
+    spans_b = spans.reshape(reshape_shape)
+    y = mins_b + np.clip(y_norm, 0.0, 1.0) * spans_b
+    return y.astype(np.float32)
+
+
 class ABMixerDataset(Dataset):
     """
     针对 (A, B) 歌曲对：
@@ -132,8 +182,9 @@ class ABMixerDataset(Dataset):
         X1 = np.concatenate([H_A, PE_A], axis=-1).astype(np.float32)
         X2 = np.concatenate([H_B, PE_B], axis=-1).astype(np.float32)
 
-        # 7) 复制标签到每一帧 (T, 8)
-        Y = np.repeat(y_vec[None, :], self.target_frames, axis=0)  # (T, 8)
+        # 7) 标签归一化到 [0,1]，并复制到每一帧 (T, 8)
+        y_norm = _minmax_norm_vec(y_vec)  # (8,)
+        Y = np.repeat(y_norm[None, :], self.target_frames, axis=0)  # (T, 8)
 
         X1_t = torch.from_numpy(X1)  # (T, d+2)
         X2_t = torch.from_numpy(X2)  # (T, d+2)
@@ -340,6 +391,10 @@ def main():
                     "num_layers": num_layers,
                     "dsp_dim": dsp_dim,
                     "target_frames": target_frames,
+                    "target_norm": {
+                        "type": "minmax",
+                        "ranges": TARGET_RANGES,
+                    },
                 }
             }, ckpt_path)
             print(f"[Checkpoint] Saved to: {ckpt_path}")
