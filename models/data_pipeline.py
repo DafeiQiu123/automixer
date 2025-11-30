@@ -21,7 +21,6 @@ if _ROOT_DIR not in sys.path:
     sys.path.append(_ROOT_DIR)
 
 from models.mert_encoder import MERTEncoder
-from models.bpm_encoding import bpm_position_encoding
 from models.transformer_mixer import MixerTransformer
 from default_parameter_output import extract_all_parameters
 
@@ -102,10 +101,9 @@ class ABMixerDataset(Dataset):
     针对 (A, B) 歌曲对：
       - 使用 extract_all_parameters 计算 8 维标签：
         [hpf1, hpf2, lpf1, lpf2, eq_low, eq_mid, eq_high, duration_ratio]
-      - 使用 MERTEncoder 分别得到 A 段和 B 段的帧级 embedding
-      - 计算每首歌的节拍相位位置编码 (sin, cos)
-      - 作为输入：x1 = [H_A, PE_A], x2 = [H_B, PE_B]
-        其中 H_* 维度 = d_mert, PE_* 维度 = 2，时间维均为 T
+      - 使用 MERTEncoder 分别得到 A 段和 B 段的帧级 embedding（不再拼接额外 PE）
+      - 模型内部用 DualBPMPositionalEncoding 注入节拍位置信息（需要 bpm_a, bpm_b）
+      - 作为输入：x1 = H_A, x2 = H_B，时间维为 T
       - 作为输出：将 8 维标签在时间维复制为 (T, 8)
     """
     def __init__(self,
@@ -176,15 +174,11 @@ class ABMixerDataset(Dataset):
         H_A = self.encoder.resample_frames(H_A, self.target_frames)  # (T, d)
         H_B = self.encoder.resample_frames(H_B, self.target_frames)  # (T, d)
 
-        # 5) 计算每首歌的节拍相位编码 (T, 2)
-        PE_A = bpm_position_encoding(path_A, target_frames=self.target_frames, sr=self.encoder.target_sr)
-        PE_B = bpm_position_encoding(path_B, target_frames=self.target_frames, sr=self.encoder.target_sr)
+        # 5) 组装输入 (T, d) - 仅 embedding
+        X1 = H_A.astype(np.float32)
+        X2 = H_B.astype(np.float32)
 
-        # 6) 组装输入 (T, d+2)
-        X1 = np.concatenate([H_A, PE_A], axis=-1).astype(np.float32)
-        X2 = np.concatenate([H_B, PE_B], axis=-1).astype(np.float32)
-
-        # 7) 标签归一化到 [0,1]，并复制到每一帧 (T, 8)
+        # 6) 标签归一化到 [0,1]，并复制到每一帧 (T, 8)
         y_norm = _minmax_norm_vec(y_vec)  # (8,)
         Y = np.repeat(y_norm[None, :], self.target_frames, axis=0)  # (T, 8)
 
@@ -195,7 +189,9 @@ class ABMixerDataset(Dataset):
         return X1_t, X2_t, Y_t, {
             "path_A": path_A,
             "path_B": path_B,
-            "duration_ratio": duration_ratio
+            "duration_ratio": duration_ratio,
+            "bpmA": float(params.get("bpmA", 120.0)),
+            "bpmB": float(params.get("bpmB", 120.0)),
         }
 
 
@@ -213,13 +209,15 @@ def train_one_epoch(model: nn.Module,
     if epoch_idx is not None and total_epochs is not None:
         desc = f"Train [{epoch_idx}/{total_epochs}]"
 
-    for X1, X2, Y, _meta in tqdm(loader, desc=desc, dynamic_ncols=True, leave=False):
-        X1 = X1.to(device)      # (B, T, d+2)
-        X2 = X2.to(device)      # (B, T, d+2)
+    for X1, X2, Y, bpmA, bpmB, _meta in tqdm(loader, desc=desc, dynamic_ncols=True, leave=False):
+        X1 = X1.to(device)      # (B, T, d)
+        X2 = X2.to(device)      # (B, T, d)
         Y = Y.to(device)        # (B, T, 8)
+        bpmA = bpmA.to(device)  # (B,)
+        bpmB = bpmB.to(device)  # (B,)
 
         optimizer.zero_grad(set_to_none=True)
-        Y_pred, _ = model(X1, X2)     # (B, T, 8)
+        Y_pred, _ = model(X1, X2, bpmA, bpmB)     # (B, T, 8)
         loss = F.mse_loss(Y_pred, Y)
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
@@ -246,11 +244,13 @@ def evaluate(model: nn.Module,
     if epoch_idx is not None and total_epochs is not None:
         desc = f"Valid [{epoch_idx}/{total_epochs}]"
 
-    for X1, X2, Y, _meta in tqdm(loader, desc=desc, dynamic_ncols=True, leave=False):
+    for X1, X2, Y, bpmA, bpmB, _meta in tqdm(loader, desc=desc, dynamic_ncols=True, leave=False):
         X1 = X1.to(device)
         X2 = X2.to(device)
         Y = Y.to(device)
-        Y_pred, _ = model(X1, X2)
+        bpmA = bpmA.to(device)
+        bpmB = bpmB.to(device)
+        Y_pred, _ = model(X1, X2, bpmA, bpmB)
         loss = F.mse_loss(Y_pred, Y)
 
         bs = X1.size(0)
@@ -336,7 +336,7 @@ def main():
     # 编码器与模型
     mert = MERTEncoder(model_name="m-a-p/MERT-v1-95M")
     d_mert = int(mert.embedding_dim)
-    in_dim_total = 2 * (d_mert + 2)   # [H_A, PE_A] + [H_B, PE_B]
+    in_dim_total = 2 * d_mert        # [H_A] + [H_B]
 
     model = MixerTransformer(
         in_dim=in_dim_total,
@@ -362,16 +362,20 @@ def main():
 
     # DataLoader
     def _collate(batch):
-        X1_list, X2_list, Y_list, M_list = [], [], [], []
+        X1_list, X2_list, Y_list, bpmA_list, bpmB_list, M_list = [], [], [], [], [], []
         for X1, X2, Y, M in batch:
             X1_list.append(X1)
             X2_list.append(X2)
             Y_list.append(Y)
+            bpmA_list.append(M["bpmA"])
+            bpmB_list.append(M["bpmB"])
             M_list.append(M)
         X1_t = torch.stack(X1_list, dim=0)
         X2_t = torch.stack(X2_list, dim=0)
         Y_t = torch.stack(Y_list, dim=0)
-        return X1_t, X2_t, Y_t, M_list
+        bpmA_t = torch.tensor(bpmA_list, dtype=torch.float32)
+        bpmB_t = torch.tensor(bpmB_list, dtype=torch.float32)
+        return X1_t, X2_t, Y_t, bpmA_t, bpmB_t, M_list
 
     train_loader = DataLoader(
         train_ds,

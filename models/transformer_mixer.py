@@ -1,6 +1,7 @@
 # models/transformer_mixer.py
 import torch
 import torch.nn as nn
+from models.pe import DualBPMPositionalEncoding
 
 
 class MixerTransformer(nn.Module):
@@ -9,7 +10,7 @@ class MixerTransformer(nn.Module):
     """
 
     def __init__(self,
-                 in_dim: int,       # 2*d_mert + 4
+                 in_dim: int,       # 2*d_mert
                  d_model: int = 512,
                  nhead: int = 8,
                  num_layers: int = 4,
@@ -17,6 +18,7 @@ class MixerTransformer(nn.Module):
         super().__init__()
 
         self.input_proj = nn.Linear(in_dim, d_model)
+        self.positional_encoding = DualBPMPositionalEncoding(hidden_dim=d_model)
 
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=d_model,
@@ -31,14 +33,21 @@ class MixerTransformer(nn.Module):
         )
         self.output_head = nn.Linear(d_model, dsp_dim)
 
-    def forward(self, x1: torch.Tensor, x2: torch.Tensor) -> torch.Tensor:
+    def forward(self,
+                x1: torch.Tensor,
+                x2: torch.Tensor,
+                bpm_a: torch.Tensor,
+                bpm_b: torch.Tensor) -> torch.Tensor:
         """
-        x1 : (B, T, in_dim)
-        x2 : (B, T, in_dim)
+        x1 : (B, T, in_dim)  - frames from song A (embeddings only)
+        x2 : (B, T, in_dim)  - frames from song B (embeddings only)
+        bpm_a : (B,)         - BPM of song A
+        bpm_b : (B,)         - BPM of song B
         returns: (B, T, dsp_dim)
         """
         x = torch.cat([x1, x2], dim=-1)
-        h = self.input_proj(x)        # (B, T, d_model)
-        h = self.transformer(h)       # (B, T, d_model)
-        y = self.output_head(h)       # (B, T, dsp_dim)
+        h = self.input_proj(x)                           # (B, T, d_model)
+        h, _pos = self.positional_encoding(h, bpm_a, bpm_b)  # (B, T, d_model)
+        h = self.transformer(h)                          # (B, T, d_model)
+        y = self.output_head(h)                          # (B, T, dsp_dim)
         return y, h
