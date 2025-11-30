@@ -31,12 +31,14 @@ class MixerTransformer(nn.Module):
         )
         self.output_head = nn.Linear(d_model, dsp_dim)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x1: torch.Tensor, x2: torch.Tensor) -> torch.Tensor:
         """
-        x: (B, T, in_dim)
+        x1 : (B, T, in_dim)
+        x2 : (B, T, in_dim)
         returns: (B, T, dsp_dim)
         """
+        x = torch.cat([x1, x2], dim=-1)
         h = self.input_proj(x)        # (B, T, d_model)
         h = self.transformer(h)       # (B, T, d_model)
         y = self.output_head(h)       # (B, T, dsp_dim)
-        return y
+        return y, h

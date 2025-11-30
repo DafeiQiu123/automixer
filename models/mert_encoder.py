@@ -3,6 +3,7 @@ import torch
 import torchaudio
 import numpy as np
 from transformers import AutoModel, AutoProcessor
+from transformers import Wav2Vec2FeatureExtractor
 from scipy.interpolate import interp1d
 
 
@@ -14,10 +15,11 @@ class MERTEncoder:
 
     def __init__(self, model_name: str = "m-a-p/MERT-v1-95M"):
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
-        self.processor = AutoProcessor.from_pretrained(model_name)
+        self.processor = Wav2Vec2FeatureExtractor.from_pretrained("m-a-p/MERT-v1-95M",trust_remote_code=True)
         self.model = AutoModel.from_pretrained(
             model_name,
-            output_hidden_states=True
+            output_hidden_states=True,
+            trust_remote_code=True
         ).to(self.device)
 
         self.target_sr = 16000
