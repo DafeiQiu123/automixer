@@ -275,7 +275,7 @@ def main():
     train_ds = ABMixerDataset(
         pairs=train_pairs,
         mert_encoder=mert,
-        target_frames=target_frames,
+        target_frames=target_frames
         max_transition_seconds=max_transition_seconds
     )
     valid_ds = ABMixerDataset(

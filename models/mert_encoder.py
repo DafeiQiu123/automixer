@@ -5,7 +5,7 @@ import numpy as np
 from transformers import AutoModel, AutoProcessor
 from transformers import Wav2Vec2FeatureExtractor
 from scipy.interpolate import interp1d
-
+from typing import Optional
 
 class MERTEncoder:
     """
