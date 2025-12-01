@@ -165,12 +165,12 @@ class ABMixerDataset(Dataset):
         audio_A_full = self.encoder.load_audio(path_A, start_sec=None, end_sec=None)
         audio_B_full = self.encoder.load_audio(path_B, start_sec=None, end_sec=None)
 
-        audio_A_seg = self._load_last_n_seconds(audio_A_full, seg_seconds)
-        audio_B_seg = self._load_first_n_seconds(audio_B_full, seg_seconds)
+        # audio_A_seg = self._load_last_n_seconds(audio_A_full, seg_seconds)
+        # audio_B_seg = self._load_first_n_seconds(audio_B_full, seg_seconds)
 
         # 4) 提取 MERT 帧特征并重采样到 T 帧
-        H_A = self.encoder.extract_embeddings(audio_A_seg)  # (Ta, d)
-        H_B = self.encoder.extract_embeddings(audio_B_seg)  # (Tb, d)
+        H_A = self.encoder.extract_embeddings(audio_A_full)  # (Ta, d)
+        H_B = self.encoder.extract_embeddings(audio_B_full)  # (Tb, d)
         H_A = self.encoder.resample_frames(H_A, self.target_frames)  # (T, d)
         H_B = self.encoder.resample_frames(H_B, self.target_frames)  # (T, d)
 
@@ -189,7 +189,6 @@ class ABMixerDataset(Dataset):
         return X1_t, X2_t, Y_t, {
             "path_A": path_A,
             "path_B": path_B,
-            "duration_ratio": duration_ratio,
             "bpmA": float(params.get("bpmA", 120.0)),
             "bpmB": float(params.get("bpmB", 120.0)),
         }
