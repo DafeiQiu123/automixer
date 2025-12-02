@@ -2,7 +2,7 @@ import numpy as np
 import soundfile as sf
 import librosa
 import matplotlib.pyplot as plt
-
+import os
 
 # =============================================================================
 # 0. 更鲁棒的 BPM 估计 + beat position
@@ -584,6 +584,9 @@ def extract_all_parameters(
     # ---- Auto EQ (merged warm EQ for both songs) ----
     eq_low, eq_mid, eq_high = merge_eq_from_two_songs(A_cut, B_cut, sr)
 
+    if negative_sample(audioA_path,audioB_path):
+        duration_ratio = 0
+
     # ---- Output dict ----
     params = {
         "bpmA": float(bpmA),
@@ -605,9 +608,66 @@ def extract_all_parameters(
     # for k, v in params.items():
     #     print(f"{k}: {v}")
     # print("============================================================\n")
+    return augment_parameters(params, 0.15)
+# =============================================================================
+# X. Add Random Variation to Parameters (数据增强用)
+# =============================================================================
+def augment_parameters(params, strength=0.1):
+    """
+    对 DSP 参数做随机扰动，使训练数据更丰富。
+    strength = 0.1 表示上下浮动 ±10%。
 
-    return params
+    输入:
+        params: 字典 (来自 extract_all_parameters)
+        strength: 扰动比例 (0.0 ~ 0.5 推荐)
 
+    输出:
+        new_params: 带扰动的新参数字典
+    """
+
+    def rand_scale(x, pct):
+        """在 ±pct 范围内随机缩放 x"""
+        noise = 1.0 + np.random.uniform(-pct, pct)
+        return x * noise
+
+    new = params.copy()
+
+    # --- duration ratio ---
+    new["duration_ratio"] = np.clip(
+        rand_scale(params["duration_ratio"], strength),
+        0,  
+        1.00,  
+    )
+
+    # --- HPF ---
+    new["hpf1"] = np.clip(rand_scale(params["hpf1"], strength), 40, 300)
+    new["hpf2"] = np.clip(rand_scale(params["hpf2"], strength), 120, 500)
+
+    # --- LPF ---
+    new["lpf1"] = np.clip(rand_scale(params["lpf1"], strength), 2000, 12000)
+    new["lpf2"] = np.clip(rand_scale(params["lpf2"], strength), 4000, 20000)
+
+    # --- EQ ---
+    new["eq_low"]  = np.clip(rand_scale(params["eq_low"],  strength), 0.6, 1.6)
+    new["eq_mid"]  = np.clip(rand_scale(params["eq_mid"],  strength), 0.6, 1.8)
+    new["eq_high"] = np.clip(rand_scale(params["eq_high"], strength), 0.5, 1.5)
+
+    return new
+
+def parse_song_info(path): 
+    name = os.path.basename(path)
+    base = name.split(".")[0]
+    songID, part = base.split("_")
+    return songID, int(part)
+
+def negative_sample(pathA, pathB):
+    idA, partA = parse_song_info(pathA)
+    idB, partB = parse_song_info(pathB)
+
+    if idA == idB:
+        if partA == 1 and partB == 2:
+            return True
+    return False
 # =============================================================================
 # Main Example
 # =============================================================================
