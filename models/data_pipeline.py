@@ -6,6 +6,7 @@ import json
 import argparse
 from typing import List, Tuple, Optional
 
+import random
 import numpy as np
 import matplotlib.pyplot as plt
 import torch
@@ -43,6 +44,37 @@ def build_pairs_from_dir(input_dir: str) -> List[Tuple[str, str]]:
     pairs: List[Tuple[str, str]] = []
     for i in range(len(files) - 1):
         pairs.append((files[i], files[i + 1]))
+    return pairs
+
+
+def build_adjacent_pairs_from_files(files: List[str]) -> List[Tuple[str, str]]:
+    pairs: List[Tuple[str, str]] = []
+    for i in range(len(files) - 1):
+        pairs.append((files[i], files[i + 1]))
+    return pairs
+
+
+def build_random_pairs_from_files(files: List[str],
+                                  num_pairs: int,
+                                  seed: int = 42) -> List[Tuple[str, str]]:
+    """
+    随机生成 (A, B) 对，允许重复抽样，但 A != B。
+    """
+    rng = random.Random(seed)
+    files = list(files)
+    if len(files) < 2:
+        return []
+    pairs: List[Tuple[str, str]] = []
+    for _ in range(max(0, num_pairs)):
+        a = rng.choice(files)
+        b = rng.choice(files)
+        # 确保 A != B
+        tries = 0
+        while b == a and tries < 10:
+            b = rng.choice(files)
+            tries += 1
+        if a != b:
+            pairs.append((a, b))
     return pairs
 
 
@@ -199,7 +231,8 @@ def train_one_epoch(model: nn.Module,
                     optimizer: torch.optim.Optimizer,
                     device: str,
                     epoch_idx: Optional[int] = None,
-                    total_epochs: Optional[int] = None) -> float:
+                    total_epochs: Optional[int] = None,
+                    iter_log: Optional[List[float]] = None) -> float:
     model.train()
     total_loss = 0.0
     total_count = 0
@@ -223,8 +256,11 @@ def train_one_epoch(model: nn.Module,
         optimizer.step()
 
         bs = X1.size(0)
-        total_loss += loss.item() * bs
+        loss_val = float(loss.item())
+        total_loss += loss_val * bs
         total_count += bs
+        if iter_log is not None:
+            iter_log.append(loss_val)
 
     return total_loss / max(1, total_count)
 
@@ -234,7 +270,8 @@ def evaluate(model: nn.Module,
              loader: DataLoader,
              device: str,
              epoch_idx: Optional[int] = None,
-             total_epochs: Optional[int] = None) -> float:
+             total_epochs: Optional[int] = None,
+             iter_log: Optional[List[float]] = None) -> float:
     model.eval()
     total_loss = 0.0
     total_count = 0
@@ -253,8 +290,11 @@ def evaluate(model: nn.Module,
         loss = F.mse_loss(Y_pred, Y)
 
         bs = X1.size(0)
-        total_loss += loss.item() * bs
+        loss_val = float(loss.item())
+        total_loss += loss_val * bs
         total_count += bs
+        if iter_log is not None:
+            iter_log.append(loss_val)
 
     return total_loss / max(1, total_count)
 
@@ -286,6 +326,15 @@ def main():
     parser.add_argument("--plot_path", type=str,
                         default=os.path.join(_ROOT_DIR, "training_curve.png"),
                         help="训练曲线保存路径 (png)")
+    parser.add_argument("--pairing_mode", type=str, default="random",
+                        choices=["adjacent", "random"], help="构造 (A,B) 对的方式")
+    parser.add_argument("--seed", type=int, default=42, help="随机种子（用于 random pairing）")
+    parser.add_argument("--num_pairs_train", type=int, default=None,
+                        help="训练集随机对数（默认 len(train_files)-1）")
+    parser.add_argument("--num_pairs_valid", type=int, default=None,
+                        help="验证集随机对数（默认 len(valid_files)-1）")
+    parser.add_argument("--use_pos_encoding", action="store_true",
+                        help="是否在模型中启用 BPM 位置编码")
     args = parser.parse_args()
 
     # 配置检查
@@ -312,23 +361,31 @@ def main():
     plot_path = args.plot_path
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    # 数据对（目录内相邻两首歌成对），并做简单切分
-    all_pairs = build_pairs_from_dir(input_dir)
-    if len(all_pairs) < 2:
-        raise RuntimeError(f"Not enough pairs found in {input_dir}. Need at least 2 files.")
-    split = int(round((1.0 - valid_ratio) * len(all_pairs)))
-    if split <= 0:
-        split = 1
-    if split >= len(all_pairs):
-        split = len(all_pairs) - 1
-    train_pairs = all_pairs[:split]
-    valid_pairs = all_pairs[split:]
+    # 基于文件列表划分训练/验证
+    all_files = _list_audio_files(input_dir)
+    if len(all_files) < 2:
+        raise RuntimeError(f"Not enough files in {input_dir}. Need at least 2 wavs.")
+    split_idx = int(round((1.0 - valid_ratio) * len(all_files)))
+    split_idx = min(max(split_idx, 1), len(all_files) - 1)
+    train_files = all_files[:split_idx]
+    valid_files = all_files[split_idx:]
+
+    if args.pairing_mode == "adjacent":
+        train_pairs = build_adjacent_pairs_from_files(train_files)
+        valid_pairs = build_adjacent_pairs_from_files(valid_files)
+    else:
+        n_train = args.num_pairs_train if args.num_pairs_train is not None else max(1, len(train_files) - 1)
+        n_valid = args.num_pairs_valid if args.num_pairs_valid is not None else max(1, len(valid_files) - 1)
+        train_pairs = build_random_pairs_from_files(train_files, n_train, seed=args.seed)
+        valid_pairs = build_random_pairs_from_files(valid_files, n_valid, seed=args.seed + 1)
 
     print(f"[Data] input_dir={input_dir}")
+    print(f"[Data] pairing_mode={args.pairing_mode}, seed={args.seed}")
+    print(f"[Data] #train files={len(train_files)}, #valid files={len(valid_files)}")
     print(f"[Data] #train pairs={len(train_pairs)}, #valid pairs={len(valid_pairs)} (valid_ratio={valid_ratio:.3f})")
     print(f"[Config] target_frames={target_frames}, max_transition_seconds={max_transition_seconds}")
     print(f"[Config] epochs={epochs}, batch_size={batch_size}, num_workers={num_workers}, lr={lr}")
-    print(f"[Model] d_model={d_model}, nhead={nhead}, layers={num_layers}, dsp_dim={dsp_dim}")
+    print(f"[Model] d_model={d_model}, nhead={nhead}, layers={num_layers}, dsp_dim={dsp_dim}, use_pos_encoding={args.use_pos_encoding}")
     print(f"[Save] ckpt_path(best)={ckpt_path}")
     print(f"[Save] ckpt_dir(all epochs)={ckpt_dir}")
 
@@ -342,7 +399,8 @@ def main():
         d_model=d_model,
         nhead=nhead,
         num_layers=num_layers,
-        dsp_dim=dsp_dim
+        dsp_dim=dsp_dim,
+        positional_encoding=bool(args.use_pos_encoding)
     ).to(device)
 
     # 数据集
@@ -399,15 +457,20 @@ def main():
     best_valid = float("inf")
     train_losses: List[float] = []
     valid_losses: List[float] = []
+    # 逐迭代曲线（跨 epoch 累积）
+    train_iter_losses: List[float] = []
+    valid_iter_losses: List[float] = []
     # 确保 checkpoint 目录存在
     os.makedirs(ckpt_dir, exist_ok=True)
 
     for epoch in tqdm(range(1, epochs + 1), total=epochs, desc="Epochs", dynamic_ncols=True):
         t0 = time.time()
         train_loss = train_one_epoch(model, train_loader, optimizer, device,
-                                     epoch_idx=epoch, total_epochs=epochs)
+                                     epoch_idx=epoch, total_epochs=epochs,
+                                     iter_log=train_iter_losses)
         valid_loss = evaluate(model, valid_loader, device,
-                              epoch_idx=epoch, total_epochs=epochs)
+                              epoch_idx=epoch, total_epochs=epochs,
+                              iter_log=valid_iter_losses)
         t1 = time.time()
         tqdm.write(f"[Epoch {epoch:02d}] train_loss={train_loss:.6f} "
                    f"valid_loss={valid_loss:.6f} time={t1 - t0:.1f}s")
@@ -424,6 +487,7 @@ def main():
                 "nhead": nhead,
                 "num_layers": num_layers,
                 "dsp_dim": dsp_dim,
+                "positional_encoding": bool(args.use_pos_encoding),
                 "target_frames": target_frames,
                 "target_norm": {
                     "type": "minmax",
@@ -447,13 +511,15 @@ def main():
     # 绘制训练曲线
     try:
         os.makedirs(os.path.dirname(plot_path), exist_ok=True)
-        epochs_axis = list(range(1, len(train_losses) + 1))
+        # 以迭代为单位的曲线
+        iters_axis_train = list(range(1, len(train_iter_losses) + 1))
+        iters_axis_valid = list(range(1, len(valid_iter_losses) + 1))
         plt.figure(figsize=(8, 5))
-        plt.plot(epochs_axis, train_losses, label="train_loss")
-        plt.plot(epochs_axis, valid_losses, label="valid_loss")
-        plt.xlabel("Epoch")
+        plt.plot(iters_axis_train, train_iter_losses, label="train_iter_loss")
+        plt.plot(iters_axis_valid, valid_iter_losses, label="valid_iter_loss")
+        plt.xlabel("Iteration")
         plt.ylabel("MSE Loss")
-        plt.title("Training Curve")
+        plt.title("Training Curve (per-iteration)")
         plt.grid(True, alpha=0.3)
         plt.legend()
         plt.tight_layout()

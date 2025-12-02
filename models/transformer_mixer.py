@@ -14,11 +14,15 @@ class MixerTransformer(nn.Module):
                  d_model: int = 512,
                  nhead: int = 8,
                  num_layers: int = 4,
-                 dsp_dim: int = 8):
+                 dsp_dim: int = 8,
+                 positional_encoding: bool = False):
         super().__init__()
 
         self.input_proj = nn.Linear(in_dim, d_model)
-        # self.positional_encoding = DualBPMPositionalEncoding(hidden_dim=d_model)
+        if positional_encoding:
+            self.positional_encoding = DualBPMPositionalEncoding(hidden_dim=d_model)
+        else:
+            self.positional_encoding = None
 
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=d_model,
@@ -47,7 +51,8 @@ class MixerTransformer(nn.Module):
         """
         x = torch.cat([x1, x2], dim=-1)
         h = self.input_proj(x)                           # (B, T, d_model)
-        # h, _pos = self.positional_encoding(h, bpm_a, bpm_b)  # (B, T, d_model)
+        if self.positional_encoding is not None:
+            h, _pos = self.positional_encoding(h, bpm_a, bpm_b)  # (B, T, d_model)
         h = self.transformer(h)                          # (B, T, d_model)
         y = self.output_head(h)                          # (B, T, dsp_dim)
         return y, h

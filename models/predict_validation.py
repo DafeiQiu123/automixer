@@ -17,12 +17,15 @@ if _ROOT_DIR not in sys.path:
 
 from models.data_pipeline import (  # type: ignore
     ABMixerDataset,
-    build_pairs_from_dir,
+    _list_audio_files,
+    build_adjacent_pairs_from_files,
+    build_random_pairs_from_files,
     denormalize_params,
     TARGET_RANGES,
 )
 from models.mert_encoder import MERTEncoder  # type: ignore
 from models.transformer_mixer import MixerTransformer  # type: ignore
+from default_parameter_output import extract_all_parameters  # type: ignore
 
 
 def load_checkpoint(ckpt_path: str, device: str) -> Tuple[torch.nn.Module, dict]:
@@ -34,6 +37,7 @@ def load_checkpoint(ckpt_path: str, device: str) -> Tuple[torch.nn.Module, dict]
         nhead=int(cfg["nhead"]),
         num_layers=int(cfg["num_layers"]),
         dsp_dim=int(cfg["dsp_dim"]),
+        positional_encoding=bool(cfg.get("positional_encoding", False)),
     ).to(device)
     model.load_state_dict(payload["model_state"])
     model.eval()
@@ -81,6 +85,11 @@ def main():
     parser.add_argument("--batch_size", type=int, default=1, help="推理 batch size（建议 1）")
     parser.add_argument("--num_workers", type=int, default=0, help="DataLoader workers")
     parser.add_argument("--save_time_series", action="store_true", help="是否保存逐帧预测到 .npy")
+    parser.add_argument("--pairing_mode", type=str, default="random",
+                        choices=["adjacent", "random"], help="构造 (A,B) 对的方式（验证集）")
+    parser.add_argument("--num_pairs_valid", type=int, default=None,
+                        help="验证集随机对数（默认 len(valid_files)-1）")
+    parser.add_argument("--seed", type=int, default=123, help="随机种子（用于 random pairing）")
     args = parser.parse_args()
 
     # 路径与设备
@@ -100,14 +109,19 @@ def main():
     print(f"[Load] checkpoint: {ckpt_file}")
     model, cfg = load_checkpoint(ckpt_file, device)
 
-    # 构造验证对（与训练相同的切分方式）
-    all_pairs = build_pairs_from_dir(input_dir)
-    if len(all_pairs) < 2:
-        raise RuntimeError(f"Not enough pairs found in {input_dir}. Need at least 2 files.")
-    split = int(round((1.0 - valid_ratio) * len(all_pairs)))
-    split = min(max(split, 1), len(all_pairs) - 1)
-    valid_pairs = all_pairs[split:]
-    print(f"[Data] #valid pairs={len(valid_pairs)}")
+    # 构造验证对（与训练切分规则一致）
+    all_files = _list_audio_files(input_dir)
+    if len(all_files) < 2:
+        raise RuntimeError(f"Not enough files in {input_dir}. Need at least 2 wavs.")
+    split_idx = int(round((1.0 - valid_ratio) * len(all_files)))
+    split_idx = min(max(split_idx, 1), len(all_files) - 1)
+    valid_files = all_files[split_idx:]
+    if args.pairing_mode == "adjacent":
+        valid_pairs = build_adjacent_pairs_from_files(valid_files)
+    else:
+        n_valid = args.num_pairs_valid if args.num_pairs_valid is not None else max(1, len(valid_files) - 1)
+        valid_pairs = build_random_pairs_from_files(valid_files, n_valid, seed=args.seed)
+    print(f"[Data] pairing_mode={args.pairing_mode}, #valid files={len(valid_files)}, #valid pairs={len(valid_pairs)}")
 
     # 编码器与数据集
     mert = MERTEncoder(model_name="m-a-p/MERT-v1-95M")
@@ -178,6 +192,29 @@ def main():
                 result["path_B"] = B_path
                 result["bpmA"] = float(meta["bpmA"])
                 result["bpmB"] = float(meta["bpmB"])
+
+                # 计算并写入 GT（未归一化）
+                try:
+                    gt_params = extract_all_parameters(
+                        A_path,
+                        B_path,
+                        sr=int(mert.target_sr),
+                        max_transition_seconds=max_transition_seconds,
+                    )
+                    gt = {
+                        "hpf1": float(gt_params["hpf1"]),
+                        "hpf2": float(gt_params["hpf2"]),
+                        "lpf1": float(gt_params["lpf1"]),
+                        "lpf2": float(gt_params["lpf2"]),
+                        "eq_low": float(gt_params["eq_low"]),
+                        "eq_mid": float(gt_params["eq_mid"]),
+                        "eq_high": float(gt_params["eq_high"]),
+                        "duration_ratio": float(gt_params["duration_ratio"]),
+                    }
+                    result["gt"] = gt
+                except Exception as e:
+                    # 失败时仅记录错误，不阻断其他对的保存
+                    result["gt_error"] = str(e)
 
                 json_path = os.path.join(output_dir, f"{stem}.json")
                 with open(json_path, "w", encoding="utf-8") as f:
