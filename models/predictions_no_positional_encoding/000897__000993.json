@@ -1,0 +1,14 @@
+{
+  "hpf1": 125.8550796508789,
+  "hpf2": 251.17921447753906,
+  "lpf1": 12000.0,
+  "lpf2": 8000.0,
+  "eq_low": 1.2832434177398682,
+  "eq_mid": 1.0073399543762207,
+  "eq_high": 0.6637325286865234,
+  "duration_ratio": 0.7532553672790527,
+  "path_A": "/oscar/home/rye13/automixer/data/wav_dir_trimmed/000897.wav",
+  "path_B": "/oscar/home/rye13/automixer/data/wav_dir_trimmed/000993.wav",
+  "bpmA": 140.625,
+  "bpmB": 127.8409090909091
+}
