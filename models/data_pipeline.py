@@ -78,6 +78,74 @@ def build_random_pairs_from_files(files: List[str],
     return pairs
 
 
+def list_all_unique_pairs(files: List[str]) -> List[Tuple[str, str]]:
+    """
+    生成所有不同的有序对 (A, B), A != B。上限 = N*(N-1)
+    """
+    files = list(files)
+    out: List[Tuple[str, str]] = []
+    for i, a in enumerate(files):
+        for j, b in enumerate(files):
+            if i == j:
+                continue
+            out.append((a, b))
+    return out
+
+
+def _load_pair_state(state_path: str) -> dict:
+    if not os.path.isfile(state_path):
+        return {"train": [], "valid": []}
+    try:
+        with open(state_path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {"train": [], "valid": []}
+
+
+def _save_pair_state(state_path: str, state: dict) -> None:
+    os.makedirs(os.path.dirname(state_path), exist_ok=True)
+    with open(state_path, "w", encoding="utf-8") as f:
+        json.dump(state, f, ensure_ascii=False, indent=2)
+
+
+def _choose_unique_pairs(all_pairs: List[Tuple[str, str]],
+                         desired_n: int,
+                         used_pairs: List[List[str]],
+                         rng: random.Random) -> Tuple[List[Tuple[str, str]], List[List[str]]]:
+    """
+    从 all_pairs 中优先选择未使用的对（无放回），如不足再从已使用的中补齐（同样无重复）。
+    used_pairs: JSON 里的列表形式 [[A,B], ...]
+    返回: (chosen_pairs, newly_used_pairs_to_append)
+    """
+    used_set = set((a, b) for a, b in used_pairs)
+    # 未使用与已使用池
+    not_used = [p for p in all_pairs if p not in used_set]
+    already_used = [p for p in all_pairs if p in used_set]
+
+    # 去重安全
+    desired_n = max(0, min(desired_n, len(all_pairs)))
+    chosen: List[Tuple[str, str]] = []
+
+    # 先从未使用中随机抽取
+    if not_used:
+        k = min(desired_n - len(chosen), len(not_used))
+        if k > 0:
+            chosen.extend(rng.sample(not_used, k))
+
+    # 不足则从已使用池中补足（避免重复）
+    if len(chosen) < desired_n and already_used:
+        remaining = desired_n - len(chosen)
+        pool = [p for p in already_used if p not in chosen]
+        if pool:
+            k2 = min(remaining, len(pool))
+            if k2 > 0:
+                chosen.extend(rng.sample(pool, k2))
+
+    # 需要追加到 used 的是这次新用到且之前未用过的
+    newly_used = [[a, b] for (a, b) in chosen if (a, b) not in used_set]
+    return chosen, newly_used
+
+
 # -----------------------------
 # 目标参数归一化（Min-Max 到 [0,1]）
 # 依据用户提供的典型范围
@@ -335,6 +403,8 @@ def main():
                         help="验证集随机对数（默认 len(valid_files)-1）")
     parser.add_argument("--use_pos_encoding", action="store_true",
                         help="是否在模型中启用 BPM 位置编码")
+    parser.add_argument("--pair_state_path", type=str, default=None,
+                        help="跨次运行的 pair 状态文件（优先选择未使用对）。默认存到 ckpt_dir/pair_state.json")
     args = parser.parse_args()
 
     # 配置检查
@@ -373,16 +443,46 @@ def main():
     if args.pairing_mode == "adjacent":
         train_pairs = build_adjacent_pairs_from_files(train_files)
         valid_pairs = build_adjacent_pairs_from_files(valid_files)
+        available_train = len(train_pairs)
+        available_valid = len(valid_pairs)
+        newly_used_train = []
+        newly_used_valid = []
     else:
-        n_train = args.num_pairs_train if args.num_pairs_train is not None else max(1, len(train_files) - 1)
-        n_valid = args.num_pairs_valid if args.num_pairs_valid is not None else max(1, len(valid_files) - 1)
-        train_pairs = build_random_pairs_from_files(train_files, n_train, seed=args.seed)
-        valid_pairs = build_random_pairs_from_files(valid_files, n_valid, seed=args.seed + 1)
+        # 随机配对：优先选未用过的，且上限为所有不同有序对
+        all_train_pairs = list_all_unique_pairs(train_files)
+        all_valid_pairs = list_all_unique_pairs(valid_files)
+        max_train = len(all_train_pairs)
+        max_valid = len(all_valid_pairs)
+
+        n_train_req = args.num_pairs_train if args.num_pairs_train is not None else max(1, len(train_files) - 1)
+        n_valid_req = args.num_pairs_valid if args.num_pairs_valid is not None else max(1, len(valid_files) - 1)
+        n_train = min(max_train, max(0, n_train_req))
+        n_valid = min(max_valid, max(0, n_valid_req))
+
+        state_path = args.pair_state_path or os.path.join(os.path.abspath(args.ckpt_dir), "pair_state.json")
+        state = _load_pair_state(state_path)
+        used_train_pairs: List[List[str]] = state.get("train", [])
+        used_valid_pairs: List[List[str]] = state.get("valid", [])
+
+        rng_train = random.Random(args.seed)
+        rng_valid = random.Random(args.seed + 1)
+
+        train_pairs, newly_used_train = _choose_unique_pairs(all_train_pairs, n_train, used_train_pairs, rng_train)
+        valid_pairs, newly_used_valid = _choose_unique_pairs(all_valid_pairs, n_valid, used_valid_pairs, rng_valid)
+
+        # 更新状态
+        state["train"] = used_train_pairs + newly_used_train
+        state["valid"] = used_valid_pairs + newly_used_valid
+        _save_pair_state(state_path, state)
+        available_train = max_train
+        available_valid = max_valid
 
     print(f"[Data] input_dir={input_dir}")
     print(f"[Data] pairing_mode={args.pairing_mode}, seed={args.seed}")
     print(f"[Data] #train files={len(train_files)}, #valid files={len(valid_files)}")
-    print(f"[Data] #train pairs={len(train_pairs)}, #valid pairs={len(valid_pairs)} (valid_ratio={valid_ratio:.3f})")
+    print(f"[Data] #train pairs={len(train_pairs)} (available unique={available_train}), "
+          f"#valid pairs={len(valid_pairs)} (available unique={available_valid}) "
+          f"(valid_ratio={valid_ratio:.3f})")
     print(f"[Config] target_frames={target_frames}, max_transition_seconds={max_transition_seconds}")
     print(f"[Config] epochs={epochs}, batch_size={batch_size}, num_workers={num_workers}, lr={lr}")
     print(f"[Model] d_model={d_model}, nhead={nhead}, layers={num_layers}, dsp_dim={dsp_dim}, use_pos_encoding={args.use_pos_encoding}")
