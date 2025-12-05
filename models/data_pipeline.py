@@ -23,7 +23,7 @@ if _ROOT_DIR not in sys.path:
 
 from models.mert_encoder import MERTEncoder
 from models.transformer_mixer import MixerTransformer
-from default_parameter_output import extract_all_parameters
+from default_parameter_output import extract_all_parameters, parse_song_info
 
 
 def _list_audio_files(input_dir: str,
@@ -401,10 +401,12 @@ def main():
                         help="训练集随机对数（默认 len(train_files)-1）")
     parser.add_argument("--num_pairs_valid", type=int, default=None,
                         help="验证集随机对数（默认 len(valid_files)-1）")
-    parser.add_argument("--use_pos_encoding", action="store_true",
-                        help="是否在模型中启用 BPM 位置编码")
+    parser.add_argument("--use_pos_encoding", type=str, default="naive", choices=["naive", "bpm", "none"],
+                        help="在模型中启用 BPM 位置编码，可选 naive, bpm, none")
     parser.add_argument("--pair_state_path", type=str, default=None,
                         help="跨次运行的 pair 状态文件（优先选择未使用对）。默认存到 ckpt_dir/pair_state.json")
+    parser.add_argument("--same_song_ratio", type=float, default=0.15,
+                        help="随机配对时，同一首歌片段对所占比例（0~1）")
     args = parser.parse_args()
 
     # 配置检查
@@ -448,11 +450,45 @@ def main():
         newly_used_train = []
         newly_used_valid = []
     else:
-        # 随机配对：优先选未用过的，且上限为所有不同有序对
-        all_train_pairs = list_all_unique_pairs(train_files)
-        all_valid_pairs = list_all_unique_pairs(valid_files)
-        max_train = len(all_train_pairs)
-        max_valid = len(all_valid_pairs)
+        # 随机配对：控制同曲对比例 same_song_ratio，且优先选未使用的对
+        def _safe_parse(path: str) -> Tuple[str, int]:
+            try:
+                sid, part = parse_song_info(path)
+                return str(sid), int(part)
+            except Exception:
+                base = os.path.splitext(os.path.basename(path))[0]
+                if "_" in base:
+                    head, tail = base.rsplit("_", 1)
+                    try:
+                        return head, int(tail)
+                    except Exception:
+                        pass
+                return base, -1
+
+        def _split_pools(files: List[str]) -> Tuple[List[Tuple[str, str]], List[Tuple[str, str]]]:
+            """
+            将所有有序对按是否来自同一首歌进行划分：
+              - same_pool: id 相同且 part 不同（如 *_1.wav → *_2.wav 或反向）
+              - diff_pool: 其余对（不同歌曲）
+            """
+            same_pool: List[Tuple[str, str]] = []
+            diff_pool: List[Tuple[str, str]] = []
+            parsed = [(_safe_parse(p), p) for p in files]  # [((id, part), path)]
+            for i, ((idA, partA), a) in enumerate(parsed):
+                for j, ((idB, partB), b) in enumerate(parsed):
+                    if i == j:
+                        continue
+                    if idA == idB and partA != partB:
+                        same_pool.append((a, b))
+                    else:
+                        diff_pool.append((a, b))
+            return same_pool, diff_pool
+
+        same_train, diff_train = _split_pools(train_files)
+        same_valid, diff_valid = _split_pools(valid_files)
+
+        max_train = len(same_train) + len(diff_train)
+        max_valid = len(same_valid) + len(diff_valid)
 
         n_train_req = args.num_pairs_train if args.num_pairs_train is not None else max(1, len(train_files) - 1)
         n_valid_req = args.num_pairs_valid if args.num_pairs_valid is not None else max(1, len(valid_files) - 1)
@@ -467,8 +503,25 @@ def main():
         rng_train = random.Random(args.seed)
         rng_valid = random.Random(args.seed + 1)
 
-        train_pairs, newly_used_train = _choose_unique_pairs(all_train_pairs, n_train, used_train_pairs, rng_train)
-        valid_pairs, newly_used_valid = _choose_unique_pairs(all_valid_pairs, n_valid, used_valid_pairs, rng_valid)
+        # 目标同曲比例
+        same_ratio = float(np.clip(args.same_song_ratio, 0.0, 1.0))
+        n_same_train = min(len(same_train), int(round(same_ratio * n_train)))
+        n_same_valid = min(len(same_valid), int(round(same_ratio * n_valid)))
+
+        # 先选同曲（未用过优先），再用不同曲补齐
+        train_same_sel, train_same_new = _choose_unique_pairs(same_train, n_same_train, used_train_pairs, rng_train)
+        used_train_after_same = used_train_pairs + train_same_new
+        train_diff_needed = n_train - len(train_same_sel)
+        train_diff_sel, train_diff_new = _choose_unique_pairs(diff_train, train_diff_needed, used_train_after_same, rng_train)
+        train_pairs = train_same_sel + train_diff_sel
+        newly_used_train = train_same_new + train_diff_new
+
+        valid_same_sel, valid_same_new = _choose_unique_pairs(same_valid, n_same_valid, used_valid_pairs, rng_valid)
+        used_valid_after_same = used_valid_pairs + valid_same_new
+        valid_diff_needed = n_valid - len(valid_same_sel)
+        valid_diff_sel, valid_diff_new = _choose_unique_pairs(diff_valid, valid_diff_needed, used_valid_after_same, rng_valid)
+        valid_pairs = valid_same_sel + valid_diff_sel
+        newly_used_valid = valid_same_new + valid_diff_new
 
         # 更新状态
         state["train"] = used_train_pairs + newly_used_train
@@ -479,6 +532,8 @@ def main():
 
     print(f"[Data] input_dir={input_dir}")
     print(f"[Data] pairing_mode={args.pairing_mode}, seed={args.seed}")
+    if args.pairing_mode == "random":
+        print(f"[Data] same_song_ratio={float(np.clip(args.same_song_ratio, 0.0, 1.0)):.3f}")
     print(f"[Data] #train files={len(train_files)}, #valid files={len(valid_files)}")
     print(f"[Data] #train pairs={len(train_pairs)} (available unique={available_train}), "
           f"#valid pairs={len(valid_pairs)} (available unique={available_valid}) "
@@ -500,7 +555,7 @@ def main():
         nhead=nhead,
         num_layers=num_layers,
         dsp_dim=dsp_dim,
-        positional_encoding=bool(args.use_pos_encoding)
+        positional_encoding=args.use_pos_encoding
     ).to(device)
 
     # 数据集

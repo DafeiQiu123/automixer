@@ -1,7 +1,7 @@
 # models/transformer_mixer.py
 import torch
 import torch.nn as nn
-from models.pe import DualBPMPositionalEncoding
+from models.pe import DualBPMPositionalEncoding, VanillaPositionalEncodingCompat
 
 
 class MixerTransformer(nn.Module):
@@ -15,11 +15,13 @@ class MixerTransformer(nn.Module):
                  nhead: int = 8,
                  num_layers: int = 4,
                  dsp_dim: int = 8,
-                 positional_encoding: bool = False):
+                 positional_encoding: str = "naive"):
         super().__init__()
 
         self.input_proj = nn.Linear(in_dim, d_model)
-        if positional_encoding:
+        if positional_encoding == "naive":
+            self.positional_encoding = VanillaPositionalEncodingCompat(hidden_dim=d_model)
+        elif positional_encoding == "bpm":
             self.positional_encoding = DualBPMPositionalEncoding(hidden_dim=d_model)
         else:
             self.positional_encoding = None

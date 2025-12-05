@@ -73,7 +73,41 @@ class DualBPMPositionalEncoding(torch.nn.Module):
 
         return x + pe, pos   # also return pos for debugging/visualization
 
+class VanillaPositionalEncodingCompat(torch.nn.Module):
+    def __init__(self, hidden_dim: int, dropout_p: float = 0.0):
+        super().__init__()
+        self.hidden_dim = hidden_dim
+        self.dropout = torch.nn.Dropout(dropout_p) if dropout_p > 0 else torch.nn.Identity()
 
+    def forward(self, x, bpm_a=None, bpm_b=None):
+        """
+        x:     [B, T, D]
+        bpm_a: [B]  (未使用, 仅占位以兼容接口)
+        bpm_b: [B]  (未使用, 仅占位以兼容接口)
+        """
+        B, T, D = x.shape
+        device = x.device
+        dtype = x.dtype
+
+        # 标准 Sinusoidal PE（Attention is All You Need）
+        position = torch.arange(T, device=device, dtype=dtype).unsqueeze(1)  # [T, 1]
+        half = D // 2  # 用成对的 sin/cos 频率
+        pe = torch.zeros(T, D, device=device, dtype=dtype)
+
+        div_term = torch.exp(
+            torch.arange(0, half, device=device, dtype=dtype) * (-math.log(10000.0) / D)
+        )
+        pe[:, 0:2*half:2] = torch.sin(position * div_term)  # 偶数维
+        pe[:, 1:2*half:2] = torch.cos(position * div_term)  # 奇数维
+        if D % 2 == 1:
+            pe[:, -1] = 0.0  # 若 D 为奇数，最后一维补零
+
+        pe = pe.unsqueeze(0).expand(B, T, D)  # [B, T, D]
+        out = self.dropout(x + pe)
+
+        # 兼容返回：给出一个“伪 pos”（帧索引），形状 [B, T]
+        pos = position.squeeze(1).unsqueeze(0).expand(B, T)
+        return out, pos
 # -----------------------------------------
 # Visualization helper
 # -----------------------------------------
