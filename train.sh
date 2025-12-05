@@ -11,7 +11,7 @@ for d in "${model_d_models[@]}"; do
     for pe in "${positional_encodings[@]}"; do
       ckpt_dir="exp/checkpoints_d${d}_L${layers}_pe_${pe}"
       plot_path="${ckpt_dir}/training_curve_d${d}_L${layers}_pe_${pe}.png"
-      python models/data_pipeline.py \
+      .venv/bin/python models/data_pipeline.py \
         --input_dir data/wav_dir_trimmed_split \
         --pairing_mode random \
         --num_pairs_train 5000 \
@@ -19,7 +19,7 @@ for d in "${model_d_models[@]}"; do
         --use_pos_encoding "${pe}" \
         --model_d_model "${d}" \
         --model_layers "${layers}" \
-        --epochs 1 \
+        --epochs 3 \
         --plot_path "${plot_path}" \
         --batch_size 8 \
         --valid_ratio 0.1 \
