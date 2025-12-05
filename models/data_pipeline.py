@@ -26,6 +26,52 @@ from models.transformer_mixer import MixerTransformer
 from default_parameter_output import extract_all_parameters, parse_song_info
 
 
+def _group_average(values: List[float], group_size: int) -> List[float]:
+    """
+    将序列按 group_size 分组做均值。最后一组不足也参与均值。
+    group_size <= 1 时直接返回原序列的拷贝（float 化）。
+    """
+    try:
+        g = int(group_size)
+    except Exception:
+        g = 1
+    g = max(1, g)
+    if g == 1:
+        return [float(v) for v in values]
+    out: List[float] = []
+    n = len(values)
+    for i in range(0, n, g):
+        chunk = values[i:i + g]
+        if not chunk:
+            continue
+        out.append(float(np.mean(chunk)))
+    return out
+
+
+def _dump_loss_logs(json_path: str,
+                    train_iter_losses: List[float],
+                    valid_iter_losses: List[float],
+                    train_epoch_losses: List[float],
+                    valid_epoch_losses: List[float],
+                    iter_group_size: int) -> None:
+    """
+    将损失日志以 JSON 持久化，便于中断恢复或后续分析。
+    """
+    try:
+        os.makedirs(os.path.dirname(json_path), exist_ok=True)
+        payload = {
+            "train_iter_losses": [float(x) for x in train_iter_losses],
+            "valid_iter_losses": [float(x) for x in valid_iter_losses],
+            "train_epoch_losses": [float(x) for x in train_epoch_losses],
+            "valid_epoch_losses": [float(x) for x in valid_epoch_losses],
+            "iter_group_size": int(max(1, int(iter_group_size))),
+        }
+        with open(json_path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        tqdm.write(f"[WARN] Failed to dump loss logs to {json_path}: {e}")
+
+
 def _list_audio_files(input_dir: str,
                       exts: Tuple[str, ...] = (".wav",)) -> List[str]:
     files = []
@@ -407,6 +453,8 @@ def main():
                         help="跨次运行的 pair 状态文件（优先选择未使用对）。默认存到 ckpt_dir/pair_state.json")
     parser.add_argument("--same_song_ratio", type=float, default=0.15,
                         help="随机配对时，同一首歌片段对所占比例（0~1）")
+    parser.add_argument("--iter_group", type=int, default=10,
+                        help="绘图时按该迭代数为一组做均值（默认10；<=1表示不分组）")
     args = parser.parse_args()
 
     # 配置检查
@@ -432,6 +480,7 @@ def main():
     ckpt_dir = args.ckpt_dir
     plot_path = args.plot_path
     device = "cuda" if torch.cuda.is_available() else "cpu"
+    iter_group_size = max(1, int(args.iter_group))
 
     # 基于文件列表划分训练/验证
     all_files = _list_audio_files(input_dir)
@@ -663,24 +712,37 @@ def main():
             torch.save(payload, best_path)
             tqdm.write(f"[Checkpoint] Saved BEST to: {ckpt_path} and {best_path}")
 
+        # 每个 epoch 将损失日志持久化，保证“每个 loss 都存起来”
+        _dump_loss_logs(
+            os.path.join(ckpt_dir, "loss_logs.json"),
+            train_iter_losses=train_iter_losses,
+            valid_iter_losses=valid_iter_losses,
+            train_epoch_losses=train_losses,
+            valid_epoch_losses=valid_losses,
+            iter_group_size=iter_group_size
+        )
+
     # 绘制训练曲线
     try:
         os.makedirs(os.path.dirname(plot_path), exist_ok=True)
-        # 以迭代为单位的曲线
-        iters_axis_train = list(range(1, len(train_iter_losses) + 1))
-        iters_axis_valid = list(range(1, len(valid_iter_losses) + 1))
+        # 以迭代为单位的曲线（按组平均，默认每10个 iter 一组）
+        train_iter_grouped = _group_average(train_iter_losses, iter_group_size)
+        valid_iter_grouped = _group_average(valid_iter_losses, iter_group_size)
+        x_train = list(range(1, len(train_iter_grouped) + 1))
+        x_valid = list(range(1, len(valid_iter_grouped) + 1))
+
         plt.figure(figsize=(8, 5))
-        plt.plot(iters_axis_train, train_iter_losses, label="train_iter_loss")
-        plt.plot(iters_axis_valid, valid_iter_losses, label="valid_iter_loss")
-        plt.xlabel("Iteration")
-        plt.ylabel("MSE Loss")
-        plt.title("Training Curve (per-iteration)")
+        plt.plot(x_train, train_iter_grouped, label=f"train_iter_loss (group={iter_group_size})")
+        plt.plot(x_valid, valid_iter_grouped, label=f"valid_iter_loss (group={iter_group_size})")
+        plt.xlabel("Iteration Group Index")
+        plt.ylabel("MSE Loss (group mean)")
+        plt.title("Training Curve (per-iteration grouped)")
         plt.grid(True, alpha=0.3)
         plt.legend()
         plt.tight_layout()
         plt.savefig(plot_path)
         plt.close()
-        tqdm.write(f"[Plot] Training curve saved to: {plot_path}")
+        tqdm.write(f"[Plot] Training curve saved to: {plot_path} (group={iter_group_size})")
     except Exception as e:
         tqdm.write(f"[Plot][WARN] Failed to save training curve: {e}")
 
