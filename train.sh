@@ -12,14 +12,14 @@ for d in "${model_d_models[@]}"; do
       ckpt_dir="exp/checkpoints_d${d}_L${layers}_pe_${pe}"
       plot_path="${ckpt_dir}/training_curve_d${d}_L${layers}_pe_${pe}.png"
       python models/data_pipeline.py \
-        --input_dir data/wav_dir_trimmed \
+        --input_dir data/wav_dir_trimmed_split \
         --pairing_mode random \
         --num_pairs_train 5000 \
         --num_pairs_valid 100 \
         --use_pos_encoding "${pe}" \
         --model_d_model "${d}" \
         --model_layers "${layers}" \
-        --epochs 3 \
+        --epochs 1 \
         --plot_path "${plot_path}" \
         --batch_size 8 \
         --valid_ratio 0.1 \

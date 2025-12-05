@@ -72,3 +72,4 @@ models/mixer_checkpoint.pt
 .venv
 cuda-11.3
 MERT/cuda_11.3.1_465.19.01_linux.run
+data/wav_dir_trimmed_split/
