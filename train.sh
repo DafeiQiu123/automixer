@@ -18,6 +18,7 @@ for d in "${model_d_models[@]}"; do
         --num_pairs_valid 100 \
         --use_pos_encoding "${pe}" \
         --model_d_model "${d}" \
+	--iter_group 20 \
         --model_layers "${layers}" \
         --epochs 3 \
         --plot_path "${plot_path}" \
