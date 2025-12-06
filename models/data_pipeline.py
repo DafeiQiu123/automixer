@@ -779,17 +779,35 @@ def main():
         x_train = list(range(1, len(train_iter_grouped) + 1))
         x_valid = list(range(1, len(valid_iter_grouped) + 1))
 
-        plt.figure(figsize=(8, 5))
-        plt.plot(x_train, train_iter_grouped, label=f"train_iter_loss (group={iter_group_size})")
-        plt.plot(x_valid, valid_iter_grouped, label=f"valid_iter_loss (per-group)")
-        plt.xlabel("Iteration Group Index")
-        plt.ylabel("MSE Loss (group mean)")
-        plt.title("Training Curve (per-iteration grouped)")
-        plt.grid(True, alpha=0.3)
-        plt.legend()
-        plt.tight_layout()
-        plt.savefig(plot_path)
-        plt.close()
+        fig, ax = plt.subplots(figsize=(8, 5))
+        ax.plot(x_train, train_iter_grouped, label=f"train_iter_loss (group={iter_group_size})")
+        ax.plot(x_valid, valid_iter_grouped, label="valid_iter_loss (per-group)")
+        ax.set_xlabel("Iteration Group Index")
+        ax.set_ylabel("MSE Loss (group mean)")
+        ax.set_title("Training Curve (per-iteration grouped)")
+        ax.grid(True, alpha=0.3)
+
+        # 自适应 Y 轴：若动态范围过大则用对数坐标，否则按分位数裁剪
+        combined = np.array(train_iter_grouped + valid_iter_grouped, dtype=np.float32)
+        if combined.size > 0:
+            y_max = float(np.max(combined))
+            positives = combined[combined > 0]
+            y_min_pos = float(np.min(positives)) if positives.size > 0 else 0.0
+            dynamic_ratio = (y_max / max(1e-8, y_min_pos)) if y_min_pos > 0 else float("inf")
+            if dynamic_ratio > 50.0:
+                ax.set_yscale("log")
+                bottom = max(1e-6, y_min_pos if y_min_pos > 0 else 1e-6)
+                top = max(bottom * 10.0, y_max * 1.1)
+                ax.set_ylim(bottom=bottom, top=top)
+            else:
+                upper = float(np.percentile(combined, 99))
+                lower = float(np.percentile(combined, 1))
+                ax.set_ylim(bottom=min(0.0, lower * 0.9), top=upper * 1.1)
+
+        ax.legend()
+        fig.tight_layout()
+        fig.savefig(plot_path)
+        plt.close(fig)
         tqdm.write(f"[Plot] Training curve saved to: {plot_path} (group={iter_group_size})")
     except Exception as e:
         tqdm.write(f"[Plot][WARN] Failed to save training curve: {e}")

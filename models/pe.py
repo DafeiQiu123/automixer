@@ -41,11 +41,10 @@ class DualBPMPositionalEncoding(torch.nn.Module):
         pos = torch.zeros(B, T, device=x.device)
 
         # A
-        pos[mask_A] = t[mask_A] / (period_a.expand_as(t)[mask_A] * self.sampling_rate)
+        pos[mask_A] = t[mask_A] + period_a.expand_as(t)[mask_A]
 
         # B
-        shifted_t_B = t[mask_B] - half_T
-        pos[mask_B] = shifted_t_B / (period_b.expand_as(t)[mask_B] * self.sampling_rate) + half_T
+        pos[mask_B] = t[mask_B] + period_b.expand_as(t)[mask_B]
 
         # -----------------------------------------
         # 5) Sinusoidal PE (A/B half mixing)

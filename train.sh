@@ -2,8 +2,8 @@
 set -euo pipefail
 
 # 参数网格
-model_d_models=(512)            # --model_d_model
-model_layers_list=(2)                 # --model_layers
+model_d_models=(32 128 512)            # --model_d_model
+model_layers_list=(1)                 # --model_layers
 positional_encodings=(none naive bpm)   # --use_pos_encoding
 
 for d in "${model_d_models[@]}"; do
