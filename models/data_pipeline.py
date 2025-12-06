@@ -346,7 +346,10 @@ def train_one_epoch(model: nn.Module,
                     device: str,
                     epoch_idx: Optional[int] = None,
                     total_epochs: Optional[int] = None,
-                    iter_log: Optional[List[float]] = None) -> float:
+                    iter_log: Optional[List[float]] = None,
+                    valid_loader_for_iter_eval: Optional[DataLoader] = None,
+                    valid_iter_log: Optional[List[float]] = None,
+                    validate_every_iters: Optional[int] = None) -> float:
     model.train()
     total_loss = 0.0
     total_count = 0
@@ -375,6 +378,25 @@ def train_one_epoch(model: nn.Module,
         total_count += bs
         if iter_log is not None:
             iter_log.append(loss_val)
+
+        # 每完成一组训练迭代（iter group），用当前模型在验证集上评估一次，
+        # 只记录一次聚合验证损失，保证与训练的组数对齐
+        if (validate_every_iters is not None and validate_every_iters > 0 and
+                valid_loader_for_iter_eval is not None and
+                valid_iter_log is not None and
+                iter_log is not None):
+            if (len(iter_log) % validate_every_iters) == 0:
+                vloss = evaluate(
+                    model,
+                    valid_loader_for_iter_eval,
+                    device,
+                    epoch_idx=epoch_idx,
+                    total_epochs=total_epochs,
+                    iter_log=None  # 只返回聚合值，不逐batch写入
+                )
+                valid_iter_log.append(float(vloss))
+                # 恢复训练模式
+                model.train()
 
     return total_loss / max(1, total_count)
 
@@ -671,10 +693,13 @@ def main():
         t0 = time.time()
         train_loss = train_one_epoch(model, train_loader, optimizer, device,
                                      epoch_idx=epoch, total_epochs=epochs,
-                                     iter_log=train_iter_losses)
+                                     iter_log=train_iter_losses,
+                                     valid_loader_for_iter_eval=valid_loader,
+                                     valid_iter_log=valid_iter_losses,
+                                     validate_every_iters=iter_group_size)
         valid_loss = evaluate(model, valid_loader, device,
                               epoch_idx=epoch, total_epochs=epochs,
-                              iter_log=valid_iter_losses)
+                              iter_log=None)
         t1 = time.time()
         tqdm.write(f"[Epoch {epoch:02d}] train_loss={train_loss:.6f} "
                    f"valid_loss={valid_loss:.6f} time={t1 - t0:.1f}s")
@@ -722,18 +747,41 @@ def main():
             iter_group_size=iter_group_size
         )
 
+    # 对齐训练/验证迭代组数量：若最后一组训练不足 iter_group，也补做一次验证
+    if iter_group_size > 0:
+        num_train_groups = int(math.ceil(len(train_iter_losses) / float(iter_group_size)))
+        if len(valid_iter_losses) < num_train_groups:
+            v_final = evaluate(
+                model,
+                valid_loader,
+                device,
+                epoch_idx=epochs,
+                total_epochs=epochs,
+                iter_log=None
+            )
+            valid_iter_losses.append(float(v_final))
+            # 补充一次持久化，保证对齐后的日志也落盘
+            _dump_loss_logs(
+                os.path.join(ckpt_dir, "loss_logs.json"),
+                train_iter_losses=train_iter_losses,
+                valid_iter_losses=valid_iter_losses,
+                train_epoch_losses=train_losses,
+                valid_epoch_losses=valid_losses,
+                iter_group_size=iter_group_size
+            )
+
     # 绘制训练曲线
     try:
         os.makedirs(os.path.dirname(plot_path), exist_ok=True)
-        # 以迭代为单位的曲线（按组平均，默认每10个 iter 一组）
+        # 以迭代为单位的曲线（训练按组平均，验证已是每组一次）
         train_iter_grouped = _group_average(train_iter_losses, iter_group_size)
-        valid_iter_grouped = _group_average(valid_iter_losses, iter_group_size)
+        valid_iter_grouped = [float(x) for x in valid_iter_losses]
         x_train = list(range(1, len(train_iter_grouped) + 1))
         x_valid = list(range(1, len(valid_iter_grouped) + 1))
 
         plt.figure(figsize=(8, 5))
         plt.plot(x_train, train_iter_grouped, label=f"train_iter_loss (group={iter_group_size})")
-        plt.plot(x_valid, valid_iter_grouped, label=f"valid_iter_loss (group={iter_group_size})")
+        plt.plot(x_valid, valid_iter_grouped, label=f"valid_iter_loss (per-group)")
         plt.xlabel("Iteration Group Index")
         plt.ylabel("MSE Loss (group mean)")
         plt.title("Training Curve (per-iteration grouped)")
