@@ -207,6 +207,8 @@ def predict_pair(
     H_B = mert.encode_segment(path_B, start_B, end_B, T)  # (T, d)
 
     # 转 Tensor，跑模型
+    H_A = H_A.astype(np.float32, copy=False)
+    H_B = H_B.astype(np.float32, copy=False)
     X1 = torch.from_numpy(H_A).unsqueeze(0).to(device)  # (1, T, d)
     X2 = torch.from_numpy(H_B).unsqueeze(0).to(device)  # (1, T, d)
     bpmA_t = torch.tensor([bpmA], dtype=torch.float32, device=device)
