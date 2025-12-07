@@ -1,0 +1,12 @@
+python /Users/jerry/Desktop/automixer/models/predict_validation.py \
+  --input_dir /Users/jerry/Desktop/automixer/data/wav_dir \
+  --valid_ratio 0.1 \
+  --pairing_mode random \
+  --num_pairs_valid 100 \
+  --ckpt_dir /Users/jerry/Desktop/automixer/exp/checkpoints_d128_L1_pe_bpm \
+  --output_dir /Users/jerry/Desktop/automixer/models/predictions \
+  --batch_size 1 \
+  --num_workers 0 \
+  --save_time_series \
+  --pe_type bpm \
+  --d_model_override 128 --nhead_override 4 --num_layers_override 1 --dsp_dim_override 8
