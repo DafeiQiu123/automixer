@@ -160,8 +160,8 @@ def predict_pair(
 ) -> dict:
     """
     对单一 (A, B) 曲目对做推理。
-    - 裁剪策略：第一首歌取后半段，第二首歌取前半段（各自一半时长）。
-    - 参照 data_pipeline 的处理：MERT → 重采样到 T 帧 → 模型预测 → 反归一化。
+    - 使用整首原始音频（不做裁剪），参照 data_pipeline 的处理：
+      MERT → 重采样到 T 帧 → 模型预测 → 反归一化。
     - 从 checkpoint 中恢复模型架构和 PE 类型（必要时从路径名推断）。
     返回包含 8 个参数和元数据的字典；可选保存到 JSON，并可保存逐帧序列 .npy。
     """
@@ -196,19 +196,11 @@ def predict_pair(
     bpmB = float(params_ana.get("bpmB", 120.0))
     duration_ratio = float(params_ana.get("duration_ratio", 0.5))
 
-    # 裁剪边界（单位：秒）：A=后半段；B=前半段
     dur_A = _audio_duration_seconds(path_A)
     dur_B = _audio_duration_seconds(path_B)
-    if dur_A > 0:
-        start_A = max(0.0, 0.5 * dur_A)
-        end_A = dur_A
-    else:
-        start_A, end_A = 0.0, None
-    if dur_B > 0:
-        start_B = 0.0
-        end_B = max(0.1, 0.5 * dur_B)
-    else:
-        start_B, end_B = 0.0, None
+    # 使用整首音频（不做裁剪）
+    start_A, end_A = None, None
+    start_B, end_B = None, None
 
     # 提取帧特征并重采样到 T
     H_A = mert.encode_segment(path_A, start_A, end_A, T)  # (T, d)
@@ -233,9 +225,10 @@ def predict_pair(
     result["path_B"] = path_B
     result["bpmA"] = bpmA
     result["bpmB"] = bpmB
-    if dur_A > 0 and dur_B > 0:
-        result["segment_A_seconds"] = float(max(0.0, (end_A if end_A is not None else dur_A) - (start_A or 0.0)))
-        result["segment_B_seconds"] = float(max(0.0, (end_B if end_B is not None else dur_B) - (start_B or 0.0)))
+    if dur_A > 0:
+        result["segment_A_seconds"] = float(dur_A)
+    if dur_B > 0:
+        result["segment_B_seconds"] = float(dur_B)
 
     # 可选：保存 JSON
     if output_json_path is not None:
@@ -283,9 +276,39 @@ def main():
     parser.add_argument("--nhead_override", type=int, default=None, help="覆盖 nhead")
     parser.add_argument("--num_layers_override", type=int, default=None, help="覆盖 num_layers")
     parser.add_argument("--dsp_dim_override", type=int, default=None, help="覆盖 dsp_dim")
+    # 单次推理（直接指定两首歌）
+    parser.add_argument("--a_path", type=str, default=None, help="单次推理：第一首歌曲路径")
+    parser.add_argument("--b_path", type=str, default=None, help="单次推理：第二首歌曲路径")
+    parser.add_argument("--output_json_path", type=str, default=None, help="单次推理：输出 JSON 路径（可选）")
     args = parser.parse_args()
 
-    # 路径与设备
+    # 单次推理分支：若提供了 a_path 与 b_path，则直接对该对歌曲做推理并退出
+    if args.a_path is not None and args.b_path is not None:
+        os.makedirs(args.output_dir, exist_ok=True)
+        ckpt_file = find_ckpt(args.ckpt_path, args.ckpt_dir)
+        baseA = os.path.splitext(os.path.basename(args.a_path))[0]
+        baseB = os.path.splitext(os.path.basename(args.b_path))[0]
+        out_json = args.output_json_path or os.path.join(args.output_dir, f"{baseA}__{baseB}.json")
+        print(f"[Single] Using checkpoint: {ckpt_file}")
+        res = predict_pair(
+            args.a_path,
+            args.b_path,
+            ckpt_file,
+            target_frames=args.target_frames,
+            max_transition_seconds=args.max_transition_seconds,
+            save_time_series=args.save_time_series,
+            output_json_path=out_json,
+            override_pe=args.pe_type,
+            override_d_model=args.d_model_override,
+            override_nhead=args.nhead_override,
+            override_num_layers=args.num_layers_override,
+            override_dsp_dim=args.dsp_dim_override,
+        )
+        print(f"[Saved] {out_json}")
+        print(json.dumps(res, ensure_ascii=False, indent=2))
+        return
+
+    # 否则走批量验证集逻辑
     input_dir = args.input_dir
     if not os.path.isdir(input_dir):
         raise FileNotFoundError(f"Input directory not found: {input_dir}")
