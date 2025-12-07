@@ -5,8 +5,18 @@ import matplotlib.pyplot as plt
 
 
 ################################################################################
-# 0. Compute beat position (absolute beats)
+# 0. Beat Position (BPM + absolute beat position)
 ################################################################################
+
+def bpm_morph_scheduler(T, beat_pos_A, beat_pos_B):
+    """
+    Smoothly interpolate beat positions between song A and B.
+    t=0 → follow A
+    t=1 → follow B
+    """
+    t = np.linspace(0, 1, T)
+    return (1 - t) * beat_pos_A + t * beat_pos_B
+
 def estimate_bpm(audio, sr,
                  min_bpm=70.0,
                  max_bpm=160.0,
@@ -27,6 +37,7 @@ def estimate_bpm(audio, sr,
     if tempo <= 0 or np.isnan(tempo):
         return default_bpm
 
+    # Half/double time correction
     while tempo > max_bpm:
         tempo /= 2.0
     while tempo < min_bpm:
@@ -36,84 +47,90 @@ def estimate_bpm(audio, sr,
 
 
 def compute_beat_position(audio, sr, T=200):
-
     bpm = estimate_bpm(audio, sr)
     duration = len(audio) / sr
-    time_axis = np.linspace(0, duration, T)
 
+    time_axis = np.linspace(0, duration, T)
     beat_pos = (bpm / 60.0) * time_axis
+
     return beat_pos, bpm, time_axis
 
 
-def bpm_morph_scheduler(T, beat_pos_A, beat_pos_B):
-    """
-    Crossfade A->B beat positions smoothly
-    """
-    t = np.linspace(0, 1, T)
-    return (1 - t) * beat_pos_A + t * beat_pos_B
 
 ################################################################################
-# 1. DSP schedule — use ONLY model outputs
+# 1. DSP Scheduler (Uses model output parameters)
 ################################################################################
 def model_dsp_schedule(T, beat_pos, params):
     """
-    params:
-        hpf1, hpf2,
-        lpf1, lpf2,
-        eq_low, eq_mid, eq_high,
-        duration_ratio (not used here)
+    Input:
+        T          - number of DSP steps
+        beat_pos   - absolute beat positions
+        params     - dict from model output:
+            hpf1, hpf2
+            lpf1, lpf2
+            eq_low, eq_mid, eq_high
+            duration_ratio (not used here)
     """
 
     t = np.linspace(0, 1, T)
 
-    # Gain — still beat-driven
+    # Crossfade gains (same as default system)
     gainA = (1 - t) + 0.05 * np.sin(2 * np.pi * beat_pos)
     gainB = t         + 0.05 * np.sin(2 * np.pi * beat_pos)
 
-    # 4 filter values from model
-    hpf1 = params["hpf1"]
-    hpf2 = params["hpf2"]
-    lpf1 = params["lpf1"]
-    lpf2 = params["lpf2"]
-
+    # Filters use simple two-stage morphing
     stage = (t >= 0.5).astype(float)
-    hpf = hpf1 * (1 - stage) + hpf2 * stage
-    lpf = lpf1 * (1 - stage) + lpf2 * stage
 
-    # EQ from model
+    hpf = params["hpf1"] * (1 - stage) + params["hpf2"] * stage
+    lpf = params["lpf1"] * (1 - stage) + params["lpf2"] * stage
+
+    # EQ is constant during transition
     eq_low  = np.ones(T) * params["eq_low"]
     eq_mid  = np.ones(T) * params["eq_mid"]
     eq_high = np.ones(T) * params["eq_high"]
 
     # Loudness envelope
     loud = np.concatenate([
-        np.linspace(1, 0.7, T//2),
-        np.linspace(0.7, 1, T - T//2)
+        np.linspace(1.0, 0.7, T//2),
+        np.linspace(0.7, 1.0, T - T//2)
     ])
 
     loud *= (1 - 0.25 * np.exp(-2 * np.mod(beat_pos, 1)))
 
-    return np.stack([gainA, gainB, hpf, lpf, eq_low, eq_mid, eq_high, loud], axis=-1)
+    # Final DSP matrix
+    return np.stack([
+        gainA, gainB,
+        hpf, lpf,
+        eq_low, eq_mid, eq_high,
+        loud
+    ], axis=-1)
+
 
 
 ################################################################################
-# 2. DSP Engine
+# 2. DSP Engine (Correct block-based DSP implementation)
 ################################################################################
 class DSPEngine:
     def __init__(self, sr=16000):
         self.sr = sr
 
+    # ================================
+    #   Frequency-domain HPF/LPF
+    # ================================
     def _filter_freq(self, audio, cutoff, mode="lowpass"):
         fft = np.fft.rfft(audio)
-        freqs = np.fft.rfftfreq(len(audio), 1/self.sr)
+        freqs = np.fft.rfftfreq(len(audio), 1 / self.sr)
 
         if mode == "lowpass":
-            fft[freqs > cutoff] = 0
+            fft[freqs > cutoff] = 0.0
         else:
-            fft[freqs < cutoff] = 0
+            fft[freqs < cutoff] = 0.0
 
         return np.fft.irfft(fft, n=len(audio))
 
+    # ================================
+    #   Simple 3-band EQ
+    # ================================
     def _apply_eq(self, audio, elo, emid, ehi):
 
         fft = np.fft.rfft(audio)
@@ -125,62 +142,62 @@ class DSPEngine:
 
         return np.fft.irfft(fft, n=len(audio))
 
+
+    # ================================
+    #   Correct transition renderer
+    # ================================
     def render_transition(self, A, B, dsp_params):
 
         T = dsp_params.shape[0]
         L = min(len(A), len(B))
 
-        x = np.linspace(0,1,T)
-        xf = np.linspace(0,1,L)
+        x = np.linspace(0, 1, T)
+        xf = np.linspace(0, 1, L)
         interp = lambda p: np.interp(xf, x, p)
 
-        gainA = interp(dsp_params[:,0])
-        gainB = interp(dsp_params[:,1])
+        # Gains (time-varying)
+        gainA = interp(dsp_params[:, 0])
+        gainB = interp(dsp_params[:, 1])
 
-        hpf_cut = interp(dsp_params[:,2])
-        lpf_cut = interp(dsp_params[:,3])
+        # Cutoffs → must use averaged values (block-based DSP)
+        hpf_cut = float(np.mean(dsp_params[:, 2]))
+        lpf_cut = float(np.mean(dsp_params[:, 3]))
 
-        eq_low  = interp(dsp_params[:,4])
-        eq_mid  = interp(dsp_params[:,5])
-        eq_high = interp(dsp_params[:,6])
+        # EQ → also block-based
+        eq_low  = float(np.mean(dsp_params[:, 4]))
+        eq_mid  = float(np.mean(dsp_params[:, 5]))
+        eq_high = float(np.mean(dsp_params[:, 6]))
 
-        loud = interp(dsp_params[:,7])
+        loud = interp(dsp_params[:, 7])
 
-        # Per-sample filtering
-        A_proc = np.zeros(L)
-        B_proc = np.zeros(L)
+        # Filtering whole segments
+        A_f = self._filter_freq(A[:L], hpf_cut, mode="highpass")
+        B_f = self._filter_freq(B[:L], lpf_cut, mode="lowpass")
 
-        for i in range(L):
-            A_proc[i] = self._apply_eq(
-                self._filter_freq(np.array([A[i]]), hpf_cut[i], "highpass"),
-                eq_low[i], eq_mid[i], eq_high[i]
-            )[0]
+        A_p = self._apply_eq(A_f, eq_low, eq_mid, eq_high)
+        B_p = self._apply_eq(B_f, eq_low, eq_mid, eq_high)
 
-            B_proc[i] = self._apply_eq(
-                self._filter_freq(np.array([B[i]]), lpf_cut[i], "lowpass"),
-                eq_low[i], eq_mid[i], eq_high[i]
-            )[0]
-
-        mix = gainA * A_proc + gainB * B_proc
+        # Mix
+        mix = gainA * A_p + gainB * B_p
         mix *= loud
 
         return mix / (np.max(np.abs(mix)) + 1e-9) * 0.95
 
 
+
 ################################################################################
-# 3. Create transition using MODEL OUTPUTS
+# 3. Make Transition (using model-predicted parameters)
 ################################################################################
 def make_transition(
     audioA_path,
     audioB_path,
-    params,                 # <---- the model output dictionary
+    params,                 # model output dict
     out_path="transition.wav",
     plot_path="dsp_plot.png",
     sr=16000,
-    max_transition_seconds=20
+    max_transition_seconds=15
 ):
 
-    # Load audio
     A, sra = sf.read(audioA_path)
     B, srb = sf.read(audioB_path)
 
@@ -190,16 +207,17 @@ def make_transition(
     A = librosa.resample(A, orig_sr=sra, target_sr=sr)
     B = librosa.resample(B, orig_sr=srb, target_sr=sr)
 
+    # Transition segment length
     duration_ratio = params["duration_ratio"]
-    print(f"[Transition] duration_ratio = {duration_ratio:.3f}")
-
     N = int(duration_ratio * max_transition_seconds * sr)
 
     A_cut = A[-N:]
     B_cut = B[:N]
 
-    beat_A, bpmA, _ = compute_beat_position(A_cut, sr, 200)
-    beat_B, bpmB, _ = compute_beat_position(B_cut, sr, 200)
+    # Beat positions for morphing
+    beat_A, _, _ = compute_beat_position(A_cut, sr, 200)
+    beat_B, _, _ = compute_beat_position(B_cut, sr, 200)
+
     beat_mix = bpm_morph_scheduler(200, beat_A, beat_B)
 
     dsp_params = model_dsp_schedule(200, beat_mix, params)
@@ -215,7 +233,7 @@ def make_transition(
 
 
 ################################################################################
-# 4. Full Song (A + transition + rest of B) — using model outputs
+# 4. Full Song (A + transition + B_rest)
 ################################################################################
 def make_full_song(
     audioA_path,
@@ -223,7 +241,7 @@ def make_full_song(
     params,
     out_path="full_mix.wav",
     sr=16000,
-    max_transition_seconds=20
+    max_transition_seconds=15
 ):
 
     A, sra = sf.read(audioA_path)
@@ -258,17 +276,23 @@ def make_full_song(
 
     return full_mix
 
+
+
+################################################################################
+# Example
+################################################################################
 if __name__ == "__main__":
+
     model_params = {
-    "hpf1": 80,
-    "hpf2": 350,
-    "lpf1": 14000,
-    "lpf2": 4500,
-    "eq_low": 1.1,
-    "eq_mid": 1.25,
-    "eq_high": 0.85,
-    "duration_ratio": 0.75
+        "hpf1": 150.04962158203125,
+  "hpf2": 270.0126647949219,
+  "lpf1": 7992.556640625,
+  "lpf2": 12000.0,
+  "eq_low": 1.2662874460220337,
+  "eq_mid": 1.0064622163772583,
+  "eq_high": 0.648768424987793,
+  "duration_ratio": 0.34610041975975037,
     }
 
-    make_transition("songA.mp3", "songB.mp3", model_params)
-    make_full_song("songA.mp3", "songB.mp3", model_params)
+    make_transition("songA_1.wav", "songB_1.wav", model_params)
+    make_full_song("songA_1.wav", "songB_1.wav", model_params)

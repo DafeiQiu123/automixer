@@ -423,7 +423,7 @@ def make_transition(
     out_path="transition.wav",
     plot_path="dsp_plot.png",
     sr=24000,
-    max_transition_seconds=20,
+    max_transition_seconds=15,
 ):
     # 读取 & 转单声道
     A, sra = sf.read(audioA_path)
@@ -484,7 +484,7 @@ def make_full_song(
     audioB_path,
     out_path="full_mix.wav",
     sr=24000,
-    max_transition_seconds=20,
+    max_transition_seconds=15,
 ):
     A, sra = sf.read(audioA_path)
     B, srb = sf.read(audioB_path)
@@ -540,7 +540,7 @@ def extract_all_parameters(
     audioA_path,
     audioB_path,
     sr=24000,
-    max_transition_seconds=20,
+    max_transition_seconds=15,
 ):
     """
     输入：两首歌（A, B）
@@ -673,18 +673,18 @@ def negative_sample(pathA, pathB):
 # =============================================================================
 if __name__ == "__main__":
     make_transition(
-        "songA.mp3",
-        "songB.mp3",
+        "songA_1.wav",
+        "songB_1.wav",
         out_path="transition.wav",
         plot_path="dsp_plot.png",
     )
 
     make_full_song(
-        "songA.mp3",
-        "songB.mp3",
+        "songA_1.wav",
+        "songB_1.wav",
         out_path="full_mix.wav",
     )
 
-    params = extract_all_parameters("songA.mp3", "songB.mp3")
+    params = extract_all_parameters("songA_1.wav", "songB_1.wav")
     print(params)
 
