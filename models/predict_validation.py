@@ -6,6 +6,7 @@ from typing import List, Tuple, Optional
 
 import numpy as np
 import torch
+import torchaudio
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
@@ -28,16 +29,91 @@ from models.transformer_mixer import MixerTransformer  # type: ignore
 from default_parameter_output import extract_all_parameters  # type: ignore
 
 
-def load_checkpoint(ckpt_path: str, device: str) -> Tuple[torch.nn.Module, dict]:
+def _infer_pe_from_path(ckpt_path: str) -> Optional[str]:
+    p = ckpt_path.lower()
+    if "pe_bpm" in p:
+        return "bpm"
+    if "pe_naive" in p:
+        return "naive"
+    if "pe_none" in p or "no_pe" in p:
+        return "none"
+    return None
+
+
+def _audio_duration_seconds(path: str) -> float:
+    """
+    使用 torchaudio.info 获取音频时长（秒）。
+    兼容 wav/mp3 等常见格式。
+    """
+    try:
+        info = torchaudio.info(path)
+        return float(info.num_frames) / max(1, int(info.sample_rate))
+    except Exception:
+        # 回退：直接载入音频推断时长
+        try:
+            wav, sr = torchaudio.load(path)
+            return float(wav.shape[-1]) / max(1, int(sr))
+        except Exception:
+            return 0.0
+
+
+def _median_ref_seconds_from_trimmed_split() -> Optional[float]:
+    """
+    扫描 data/wav_dir_trimmed_split 下的 *.wav 文件，
+    返回这些切片的“中位数时长（秒）”作为参考裁剪长度。
+    若目录不存在或无有效文件则返回 None。
+    """
+    ref_dir = os.path.join(_ROOT_DIR, "data", "wav_dir_trimmed_split")
+    if not os.path.isdir(ref_dir):
+        return None
+    try:
+        seconds: List[float] = []
+        for name in sorted(os.listdir(ref_dir)):
+            if name.lower().endswith(".wav"):
+                dur = _audio_duration_seconds(os.path.join(ref_dir, name))
+                if dur > 0:
+                    seconds.append(dur)
+        if seconds:
+            return float(np.median(seconds))
+        return None
+    except Exception:
+        return None
+
+
+def load_checkpoint(
+    ckpt_path: str,
+    device: str,
+    positional_encoding_override: Optional[str] = None,
+    d_model_override: Optional[int] = None,
+    nhead_override: Optional[int] = None,
+    num_layers_override: Optional[int] = None,
+    dsp_dim_override: Optional[int] = None,
+) -> Tuple[torch.nn.Module, dict]:
     payload = torch.load(ckpt_path, map_location=device)
     cfg = payload["config"]
+    # 兼容历史 ckpt 中将 positional_encoding 误存为 bool 的情况
+    if positional_encoding_override is not None:
+        pe_type = str(positional_encoding_override)
+    else:
+        pe_cfg = cfg.get("positional_encoding", "naive")
+        if isinstance(pe_cfg, bool):
+            pe_from_name = _infer_pe_from_path(ckpt_path)
+            if pe_from_name is not None:
+                pe_type = pe_from_name
+            else:
+                pe_type = "naive" if pe_cfg else "none"
+        elif isinstance(pe_cfg, str):
+            pe_type = pe_cfg
+        else:
+            pe_type = "naive"
+
     model = MixerTransformer(
         in_dim=int(cfg["in_dim"]),
-        d_model=int(cfg["d_model"]),
-        nhead=int(cfg["nhead"]),
-        num_layers=int(cfg["num_layers"]),
-        dsp_dim=int(cfg["dsp_dim"]),
-        positional_encoding=bool(cfg.get("positional_encoding", False)),
+        d_model=int(d_model_override) if d_model_override is not None else int(cfg["d_model"]),
+        nhead=int(nhead_override) if nhead_override is not None else int(cfg["nhead"]),
+        num_layers=int(num_layers_override) if num_layers_override is not None else int(cfg["num_layers"]),
+        dsp_dim=int(dsp_dim_override) if dsp_dim_override is not None else int(cfg["dsp_dim"]),
+        positional_encoding=pe_type,
     ).to(device)
     model.load_state_dict(payload["model_state"])
     model.eval()
@@ -66,6 +142,116 @@ def find_ckpt(ckpt_path: Optional[str], ckpt_dir: Optional[str]) -> str:
     raise FileNotFoundError("No checkpoint found. Please provide --ckpt_path or --ckpt_dir.")
 
 
+@torch.no_grad()
+def predict_pair(
+    path_A: str,
+    path_B: str,
+    ckpt: str,
+    *,
+    target_frames: Optional[int] = None,
+    max_transition_seconds: int = 20,
+    save_time_series: bool = False,
+    output_json_path: Optional[str] = None,
+    override_pe: Optional[str] = None,
+    override_d_model: Optional[int] = None,
+    override_nhead: Optional[int] = None,
+    override_num_layers: Optional[int] = None,
+    override_dsp_dim: Optional[int] = None,
+) -> dict:
+    """
+    对单一 (A, B) 曲目对做推理。
+    - 裁剪策略：第一首歌取后半段，第二首歌取前半段（各自一半时长）。
+    - 参照 data_pipeline 的处理：MERT → 重采样到 T 帧 → 模型预测 → 反归一化。
+    - 从 checkpoint 中恢复模型架构和 PE 类型（必要时从路径名推断）。
+    返回包含 8 个参数和元数据的字典；可选保存到 JSON，并可保存逐帧序列 .npy。
+    """
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    ckpt_file = find_ckpt(ckpt, None)
+    model, cfg = load_checkpoint(
+        ckpt_file,
+        device,
+        positional_encoding_override=override_pe,
+        d_model_override=override_d_model,
+        nhead_override=override_nhead,
+        num_layers_override=override_num_layers,
+        dsp_dim_override=override_dsp_dim,
+    )
+
+    # 反归一化范围
+    norm_cfg = cfg.get("target_norm", {"type": "minmax", "ranges": TARGET_RANGES})
+    ranges = norm_cfg.get("ranges", TARGET_RANGES)
+
+    # 编码器
+    mert = MERTEncoder(model_name="m-a-p/MERT-v1-95M")
+    T = int(target_frames) if target_frames is not None else int(cfg.get("target_frames", 200))
+
+    # 先分析参数（得到 bpmA/bpmB 与 duration_ratio）
+    params_ana = extract_all_parameters(
+        path_A,
+        path_B,
+        sr=int(mert.target_sr),
+        max_transition_seconds=int(max_transition_seconds),
+    )
+    bpmA = float(params_ana.get("bpmA", 120.0))
+    bpmB = float(params_ana.get("bpmB", 120.0))
+    duration_ratio = float(params_ana.get("duration_ratio", 0.5))
+
+    # 裁剪边界（单位：秒）：A=后半段；B=前半段
+    dur_A = _audio_duration_seconds(path_A)
+    dur_B = _audio_duration_seconds(path_B)
+    if dur_A > 0:
+        start_A = max(0.0, 0.5 * dur_A)
+        end_A = dur_A
+    else:
+        start_A, end_A = 0.0, None
+    if dur_B > 0:
+        start_B = 0.0
+        end_B = max(0.1, 0.5 * dur_B)
+    else:
+        start_B, end_B = 0.0, None
+
+    # 提取帧特征并重采样到 T
+    H_A = mert.encode_segment(path_A, start_A, end_A, T)  # (T, d)
+    H_B = mert.encode_segment(path_B, start_B, end_B, T)  # (T, d)
+
+    # 转 Tensor，跑模型
+    X1 = torch.from_numpy(H_A).unsqueeze(0).to(device)  # (1, T, d)
+    X2 = torch.from_numpy(H_B).unsqueeze(0).to(device)  # (1, T, d)
+    bpmA_t = torch.tensor([bpmA], dtype=torch.float32, device=device)
+    bpmB_t = torch.tensor([bpmB], dtype=torch.float32, device=device)
+
+    y_hat_norm, _ = model(X1, X2, bpmA_t, bpmB_t)  # (1, T, 8)
+    y_hat_norm_np = y_hat_norm.detach().cpu().numpy()[0]  # (T, 8)
+
+    # 聚合为单个 8 维向量，并反归一化
+    y_mean = y_hat_norm_np.mean(axis=0)  # (8,)
+    y_denorm = denormalize_params(y_mean, ranges=ranges)
+
+    keys = ["hpf1", "hpf2", "lpf1", "lpf2", "eq_low", "eq_mid", "eq_high", "duration_ratio"]
+    result = {k: float(v) for k, v in zip(keys, y_denorm.tolist())}
+    result["path_A"] = path_A
+    result["path_B"] = path_B
+    result["bpmA"] = bpmA
+    result["bpmB"] = bpmB
+    if dur_A > 0 and dur_B > 0:
+        result["segment_A_seconds"] = float(max(0.0, (end_A if end_A is not None else dur_A) - (start_A or 0.0)))
+        result["segment_B_seconds"] = float(max(0.0, (end_B if end_B is not None else dur_B) - (start_B or 0.0)))
+
+    # 可选：保存 JSON
+    if output_json_path is not None:
+        os.makedirs(os.path.dirname(output_json_path), exist_ok=True)
+        with open(output_json_path, "w", encoding="utf-8") as f:
+            json.dump(result, f, ensure_ascii=False, indent=2)
+
+    # 可选：保存逐帧
+    if save_time_series and output_json_path is not None:
+        ts_path = os.path.splitext(output_json_path)[0] + "_series.npy"
+        y_hat_ts = denormalize_params(y_hat_norm_np, ranges=ranges)  # (T, 8)
+        np.save(ts_path, y_hat_ts)
+
+    return result
+
+
 def main():
     parser = argparse.ArgumentParser(description="Run inference on validation split and save per-pair results.")
     parser.add_argument("--input_dir", type=str,
@@ -90,6 +276,13 @@ def main():
     parser.add_argument("--num_pairs_valid", type=int, default=None,
                         help="验证集随机对数（默认 len(valid_files)-1）")
     parser.add_argument("--seed", type=int, default=123, help="随机种子（用于 random pairing）")
+    # 结构覆盖选项（如需与 checkpoint 不一致或修复历史 ckpt 中 PE 配置）
+    parser.add_argument("--pe_type", type=str, default=None, choices=["naive", "bpm", "none"],
+                        help="覆盖使用的 positional encoding 类型（默认沿用 ckpt 配置，或从路径推断）")
+    parser.add_argument("--d_model_override", type=int, default=None, help="覆盖 d_model")
+    parser.add_argument("--nhead_override", type=int, default=None, help="覆盖 nhead")
+    parser.add_argument("--num_layers_override", type=int, default=None, help="覆盖 num_layers")
+    parser.add_argument("--dsp_dim_override", type=int, default=None, help="覆盖 dsp_dim")
     args = parser.parse_args()
 
     # 路径与设备
@@ -107,7 +300,15 @@ def main():
     # Checkpoint
     ckpt_file = find_ckpt(args.ckpt_path, args.ckpt_dir)
     print(f"[Load] checkpoint: {ckpt_file}")
-    model, cfg = load_checkpoint(ckpt_file, device)
+    model, cfg = load_checkpoint(
+        ckpt_file,
+        device,
+        positional_encoding_override=args.pe_type,
+        d_model_override=args.d_model_override,
+        nhead_override=args.nhead_override,
+        num_layers_override=args.num_layers_override,
+        dsp_dim_override=args.dsp_dim_override,
+    )
 
     # 构造验证对（与训练切分规则一致）
     all_files = _list_audio_files(input_dir)
