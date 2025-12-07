@@ -2,7 +2,6 @@ import torch
 import math
 import matplotlib.pyplot as plt
 
-
 class DualBPMPositionalEncoding(torch.nn.Module):
     def __init__(self, hidden_dim, sampling_rate=24000):
         super().__init__()
@@ -38,37 +37,39 @@ class DualBPMPositionalEncoding(torch.nn.Module):
         # -----------------------------------------
         # 4) Compute pos: beat index per segment
         # -----------------------------------------
+        # pos = torch.zeros(B, T, device=x.device)
+
+        # # A
+        # pos[mask_A] = t[mask_A] + period_a.expand_as(t)[mask_A] 
+
+        # # B
+        # pos[mask_B] = t[mask_B] + period_b.expand_as(t)[mask_B]
+
+                # 4) Compute pos: beat index per segment
         pos = torch.zeros(B, T, device=x.device)
 
-        # A
-        pos[mask_A] = t[mask_A] + period_a.expand_as(t)[mask_A]
+        # A segment beat index
+        pos[mask_A] = t[mask_A] / period_a.expand_as(t)[mask_A]
 
-        # B
-        pos[mask_B] = t[mask_B] + period_b.expand_as(t)[mask_B]
+        # B segment beat index (reset to 0 at half_T)
+        pos[mask_B] = (t[mask_B] - half_T) / period_b.expand_as(t)[mask_B]
 
         # -----------------------------------------
         # 5) Sinusoidal PE (A/B half mixing)
         # -----------------------------------------
-        half = D // 2
-
         freq = torch.exp(
-            torch.arange(0, half, 2, device=x.device) * (-math.log(10000.0) / half)
+            torch.arange(0, D, 2, device=x.device) * (-math.log(10000.0) / D)
         )
-        freq = freq.unsqueeze(0).unsqueeze(0)  # [1,1,H/4]
+        freq = freq.unsqueeze(0).unsqueeze(0)  # [1,1,D/2]
 
         pos_exp = pos.unsqueeze(-1)
 
-        pe_a = torch.zeros(B, T, half, device=x.device)
-        pe_a[:, :, 0::2] = torch.sin(pos_exp * freq)
-        pe_a[:, :, 1::2] = torch.cos(pos_exp * freq)
-
-        pe_b = torch.zeros(B, T, half, device=x.device)
-        pe_b[:, :, 0::2] = torch.sin(pos_exp * freq)
-        pe_b[:, :, 1::2] = torch.cos(pos_exp * freq)
-
-        pe = torch.cat([pe_a, pe_b], dim=-1)
+        pe = torch.zeros(B, T, D, device=x.device)
+        pe[:, :, 0::2] = torch.sin(pos_exp * freq)
+        pe[:, :, 1::2] = torch.cos(pos_exp * freq)
 
         return x + pe, pos   # also return pos for debugging/visualization
+
 
 class VanillaPositionalEncodingCompat(torch.nn.Module):
     def __init__(self, hidden_dim: int, dropout_p: float = 0.0):
