@@ -1,12 +1,8 @@
-python /Users/jerry/Desktop/automixer/models/predict_validation.py \
-  --input_dir /Users/jerry/Desktop/automixer/data/wav_dir \
-  --valid_ratio 0.1 \
-  --pairing_mode random \
-  --num_pairs_valid 100 \
-  --ckpt_dir /Users/jerry/Desktop/automixer/exp/checkpoints_d128_L1_pe_bpm \
-  --output_dir /Users/jerry/Desktop/automixer/models/predictions \
-  --batch_size 1 \
-  --num_workers 0 \
+python models/predict_validation.py \
+  --a_path /users/rye13/automixer/data/inference/000002_2.wav \
+  --b_path /users/rye13/automixer/data/inference/000005_1.wav \
+  --ckpt_dir exp/checkpoints_d128_L1_pe_naive \
+  --output_dir  /users/rye13/automixer/data/inference/ \
+  --output_json_path /users/rye13/automixer/data/inference/vanilla.json \
   --save_time_series \
-  --pe_type bpm \
-  --d_model_override 128 --nhead_override 4 --num_layers_override 1 --dsp_dim_override 8
+  --pe_type naive --d_model_override 128 --num_layers_override 1

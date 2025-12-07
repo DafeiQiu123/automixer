@@ -1,0 +1,16 @@
+{
+  "hpf1": 150.04962158203125,
+  "hpf2": 270.0126647949219,
+  "lpf1": 12000.0,
+  "lpf2": 7992.556640625,
+  "eq_low": 1.2662874460220337,
+  "eq_mid": 1.0064622163772583,
+  "eq_high": 0.648768424987793,
+  "duration_ratio": 0.34610041975975037,
+  "path_A": "/users/rye13/automixer/data/inference/000002_2.wav",
+  "path_B": "/users/rye13/automixer/data/inference/000005_1.wav",
+  "bpmA": 82.72058823529412,
+  "bpmB": 100.44642857142857,
+  "segment_A_seconds": 14.98825,
+  "segment_B_seconds": 14.98825
+}

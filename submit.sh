@@ -5,5 +5,6 @@
 
 #SBATCH -o tmp.log
 
+nvidia-smi
 bash init.sh
 bash train.sh
