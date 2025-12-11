@@ -32,3 +32,6 @@
 128_1_bpm [done]
 32_1_bpm [done]
 512_1_none [done]
+128_1_none [done]
+512_1_naive [done]
+512_1_bpm [done]
